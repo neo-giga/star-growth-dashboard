@@ -6,12 +6,26 @@ function numeric(value) {
   if (typeof value === 'string' && /^[+-]?\d+$/.test(value)) value = Number(value);
   return typeof value === 'number' && Number.isSafeInteger(value) ? value : null;
 }
+function creationTime(value) {
+  if (typeof value !== 'string') return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.exec(value);
+  if (!match) return null;
+  const [, year, month, day, hour, minute, second] = match.map(Number);
+  if (month < 1 || month > 12 || day < 1 || day > new Date(Date.UTC(year, month, 0)).getUTCDate() || hour > 23 || minute > 59 || second > 59) return null;
+  const instant = Date.parse(value);
+  return Number.isFinite(instant) ? instant : null;
+}
+function creationLabel(value) {
+  const instant = creationTime(value);
+  return instant === null ? 'UNKNOWN' : new Date(instant).toISOString().slice(0, 10);
+}
 function selectRows(rows, {sort = 'gain', search = '', language = ''} = {}) {
   const query = search.trim().toLowerCase();
   return rows.filter(row => (!language || (row.language || 'UNKNOWN') === language) &&
     (!query || `${row.full_name || ''} ${row.description || ''}`.toLowerCase().includes(query)))
     .slice().sort((a, b) => {
-      const av = numeric(a[sort]), bv = numeric(b[sort]);
+      const metric = sort === 'created_at' ? creationTime : numeric;
+      const av = metric(a[sort]), bv = metric(b[sort]);
       if (av === null && bv !== null) return 1;
       if (bv === null && av !== null) return -1;
       if (av !== bv) return bv - av;
@@ -29,7 +43,7 @@ function timeLabel(value) {
   if (!value || Number.isNaN(Date.parse(value))) return 'UNKNOWN';
   return new Date(value).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ' UTC');
 }
-if (typeof module !== 'undefined') module.exports = {numeric, selectRows, repoURL, displayNumber, timeLabel};
+if (typeof module !== 'undefined') module.exports = {numeric, creationTime, creationLabel, selectRows, repoURL, displayNumber, timeLabel};
 if (typeof document !== 'undefined') {
   const el = id => document.getElementById(id);
   let feeds = [], page = 1;
@@ -51,7 +65,8 @@ if (typeof document !== 'undefined') {
       ['Observed / provider reported', `${displayNumber(feed.rows.length)} / ${displayNumber(coverage.last_reported_total ?? coverage.reported_total)} (latest)`],
       ['Source snapshot date', feed.source_as_of ? timeLabel(feed.source_as_of) : 'UNKNOWN · not supplied by provider'],
       ['Retrieval began', timeLabel(feed.fetched_at_start)],
-      ['Retrieval ended', `${timeLabel(fetched)}${age === null ? '' : ` · ${age}h ago`}`]
+      ['Retrieval ended', `${timeLabel(fetched)}${age === null ? '' : ` · ${age}h ago`}`],
+      ['GitHub creation dates', `${feed.rows.filter(row => creationTime(row.created_at) !== null).length.toLocaleString()} known · ${feed.rows.filter(row => creationTime(row.created_at) === null).length.toLocaleString()} UNKNOWN`]
     ];
     for (const [label, value] of fields) { const item = node('div'); item.append(node('span', label, 'meta-label'), node('span', value, 'meta-value')); grid.append(item); }
     root.append(grid);
@@ -81,11 +96,14 @@ if (typeof document !== 'undefined') {
       if (url) { title.href = url; title.target = '_blank'; title.rel = 'noopener noreferrer'; }
       name.append(title); if (row.description) name.append(node('span', String(row.description), 'description'));
       const stars = node('td', displayNumber(row.stars), 'number'), gain = node('td', displayNumber(row.gain, true), 'number');
+      const created = node('td', creationLabel(row.created_at), 'created-date');
+      if (creationTime(row.created_at) === null) created.classList.add('unknown');
+      else created.title = `GitHub repository created: ${timeLabel(row.created_at)}`;
       if (numeric(row.stars) === null) stars.classList.add('unknown');
       if (numeric(row.gain) === null) gain.classList.add('unknown'); else if (numeric(row.gain) > 0) gain.classList.add('positive');
-      tr.append(node('td', String(offset + index + 1)), name, node('td', row.language || 'UNKNOWN'), stars, gain); body.append(tr);
+      tr.append(node('td', String(offset + index + 1)), name, node('td', row.language || 'UNKNOWN'), created, stars, gain); body.append(tr);
     }
-    if (!sorted.length) { const td = node('td', feed ? 'No matches. Try clearing the search or language filter.' : 'No data loaded for this feed.'); td.colSpan = 5; const tr = node('tr'); tr.append(td); body.append(tr); }
+    if (!sorted.length) { const td = node('td', feed ? 'No matches. Try clearing the search or language filter.' : 'No data loaded for this feed.'); td.colSpan = 6; const tr = node('tr'); tr.append(td); body.append(tr); }
     el('previous').disabled = page <= 1; el('next').disabled = page >= pages;
     el('page-label').textContent = `Page ${page} of ${pages}`;
   }
