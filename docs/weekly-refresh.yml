@@ -1,0 +1,84 @@
+# NOT INSTALLED: owner must add this at .github/workflows/weekly-refresh.yml and select Pages GitHub Actions.
+# Approved job-scoped permissions for the public dashboard repository only.
+# Install as .github/workflows/weekly-refresh.yml in the public dashboard repository.
+# Official artifact deployment is explicit; GITHUB_TOKEN pushes alone do not trigger Pages.
+name: Weekly public feed refresh
+on:
+  schedule:
+    - cron: '23 7 * * 1'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'refresh retrieves new feeds; validate-current tests exports/deployment without new data'
+        type: choice
+        options: [refresh, validate-current]
+        default: validate-current
+      max_pages:
+        description: 'Per-period safety bound; a reached bound never publishes partial data'
+        type: string
+        default: '1000'
+permissions:
+  contents: read
+concurrency:
+  group: public-feed-publication
+  cancel-in-progress: false
+jobs:
+  refresh-and-publish:
+    if: github.repository == 'neo-giga/star-growth-dashboard'
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    # Neo approved this narrow publication bundle; no personal token is required.
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Unit checks (no network fixtures)
+        run: python3 -m unittest discover -s tests
+      - name: Stage validated site without changing current files
+        env:
+          MODE: ${{ inputs.mode || 'refresh' }}
+          MAX_PAGES: ${{ inputs.max_pages || '1000' }}
+        run: |
+          python3 scripts/weekly_refresh.py --site-dir . --output-dir "$RUNNER_TEMP/site" \
+            --mode "$MODE" --max-pages "$MAX_PAGES" \
+            --checkpoint-dir "$RUNNER_TEMP/checkpoints" --diagnostic "$RUNNER_TEMP/refresh-diagnostic.json"
+      - name: Preserve diagnostic and public page checkpoints
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: refresh-diagnostic-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/refresh-diagnostic.json
+            ${{ runner.temp }}/checkpoints
+          retention-days: 7
+          if-no-files-found: ignore
+      - name: Persist immutable snapshots and current pointer
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Only validated allowlisted site output is copied. No deletions of old snapshots/assets.
+          cp -a "$RUNNER_TEMP/site/." .
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add index.html .nojekyll llms.txt api docs/agent-feed.md
+          git add -- 'app.*.js' 'style.*.css' 'data.*.json'
+          if ! git diff --cached --quiet; then
+            git commit -m 'Refresh validated public repository feed'
+            # No force push: a concurrent outside writer fails safely instead of overwriting.
+            git -c credential.helper='!gh auth git-credential' push origin HEAD:main
+          fi
+      - name: Upload exact staged Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/site
+      - name: Deploy exact artifact
+        id: deployment
+        uses: actions/deploy-pages@v4
