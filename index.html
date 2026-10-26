@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Star Growth · Repository explorer</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+<main>
+  <header><p class="eyebrow">GITHUB REPOSITORY EXPLORER</p><h1>Star growth, without the guesswork.</h1><p class="intro">Explore observed repositories by total stars or raw growth. Every view keeps its source and coverage visible.</p></header>
+  <section class="notice" aria-labelledby="scope-title"><h2 id="scope-title">An observed feed, not all of GitHub</h2><p>Rankings apply only to the selected feed's observed rows. Periods have different coverage. Missing history is <strong>UNKNOWN</strong>, not zero. GitTrend's weighted trending score is not used.</p></section>
+  <section class="controls" aria-label="Explore repositories">
+    <label>Feed window<select id="period"><option value="week">Weekly · 7 days</option><option value="month">Monthly · 30 days</option><option value="day">Daily · 1 day</option></select></label>
+    <label>Sort by<select id="sort"><option value="gain">Raw star gain ↓</option><option value="stars">Total stars ↓</option></select></label>
+    <label class="search">Search repositories<input id="search" type="search" placeholder="Repository name" autocomplete="off"></label>
+    <label>Language<select id="language"><option value="">All languages</option></select></label>
+  </section>
+  <section class="provenance" aria-labelledby="data-title"><h2 id="data-title">Source & coverage</h2><div id="metadata">Loading source metadata…</div><ul id="warnings"></ul></section>
+  <div class="results-head"><h2>Observed repositories</h2><p id="result-count" role="status" aria-live="polite">Loading…</p></div>
+  <div class="table-wrap" tabindex="0" role="region" aria-label="Repository results; scroll horizontally on small screens"><table><caption class="sr-only">Repositories sorted numerically within the selected feed</caption><thead><tr><th scope="col">Rank</th><th scope="col">Repository</th><th scope="col">Language</th><th scope="col" class="number">Total stars</th><th scope="col" class="number" id="gain-heading">7-day gain</th></tr></thead><tbody id="rows"></tbody></table></div>
+  <nav class="pagination" aria-label="Results pages"><button id="previous" type="button">← Previous</button><span id="page-label"></span><button id="next" type="button">Next →</button></nav>
+  <p id="error" class="notice" role="alert" hidden></p>
+  <noscript><p class="notice">JavaScript is needed to filter and sort this static dataset. No login or tracking is used.</p></noscript>
+  <footer><p>Source: <a href="https://gittrend.io/methodology">GitTrend methodology</a> · aggregate data advertised as CC0. Provider-reported gains are not independently reconstructed history.</p><p>No live refresh or scheduled update is implied. Fetch time is not the source's snapshot date. No gitpulse dataset is published here.</p></footer>
+</main>
+</body>
+</html>
