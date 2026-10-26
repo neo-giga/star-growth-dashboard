@@ -119,8 +119,9 @@ def copy_public_site(site, stage):
             shutil.copytree(path,stage/path.name)
         elif path.is_dir() and path.name == 'docs':
             (stage/'docs').mkdir()
-            doc=path/'agent-feed.md'
-            if doc.is_file() and not doc.is_symlink(): shutil.copyfile(doc,stage/'docs'/'agent-feed.md')
+            for name in ('agent-feed.md','weekly-refresh.yml'):
+                doc=path/name
+                if doc.is_file() and not doc.is_symlink(): shutil.copyfile(doc,stage/'docs'/name)
 
 
 def stage_site(site_dir, output_dir, mode='refresh', max_pages=1000, checkpoint_dir=None,

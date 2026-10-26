@@ -92,3 +92,7 @@ That tests staging/publication without inventing a fresh retrieval. After succes
 run refresh with the normal page bound and monitor all three periods to completion.
 The schedule is Monday 07:23 UTC only after installation. If any pagination or
 count check fails, do not publish the partial refresh or advance the catalog.
+
+Official setup references: [Pages publishing source](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site),
+[manual workflow runs](https://docs.github.com/en/actions/how-tos/manage-workflow-runs),
+and [custom Pages workflows](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages).
