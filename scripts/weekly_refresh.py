@@ -9,10 +9,12 @@ reach the provider's end with at least TAIL_COVERAGE of the reported total. --to
 Public cached GitHub metadata is carried only for same period/provider ID/name.
 """
 from __future__ import annotations
-import argparse, copy, datetime as dt, json, math, os, pathlib, re, shutil, subprocess, sys, tempfile, time
+import argparse, copy, datetime as dt, gzip, json, math, os, pathlib, shutil, subprocess, sys, tempfile, time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from trending.feeds import FeedClient, collect_feed
+from trending.published import (LIVE_SITE, LiveSite, LocalSite, checkout_data_files, hydrate_metadata, read_site_data, read_snapshot,
+                                seed_created_dates, snapshot_records, validate_dashboard, write_snapshot)
 from fill_created_dates import fill_created_dates
 # GitTrend answers with Cache-Control: s-maxage=300, stale-while-revalidate=600, so a shared cache may replay a response
 # for up to 900 s. Every later pass starts after that whole window plus a margin, so it cannot be served pass A's pages.
@@ -22,52 +24,51 @@ RETRY_DELAY = 300 + 600 + 10
 TAIL_COVERAGE = 0.98
 
 
-def local_asset(root, name):
-    if not re.fullmatch(r'[A-Za-z0-9._-]+', name) or name.startswith('.'):
-        raise ValueError('unsafe asset reference')
-    path = root / name
-    if path.is_symlink() or not path.is_file():
-        raise ValueError('missing/nonregular asset')
-    return path
-
-
 def read_current(site):
-    site = pathlib.Path(site)
-    index = local_asset(site, 'index.html').read_text()
-    app_name = re.search(r'<script[^>]+src="([^"]+)"', index)
-    css_name = re.search(r'<link[^>]+href="([^"]+\.css)"', index)
-    if not app_name or not css_name:
-        raise ValueError('missing UI assets')
-    app = local_asset(site, app_name[1]).read_text()
-    css = local_asset(site, css_name[1]).read_text()
-    data_name = re.search(r"fetch\('([^']+)'", app)
-    if not data_name:
-        raise ValueError('missing local data reference')
-    data = json.loads(local_asset(site, data_name[1]).read_text())
-    validate_dashboard(data)
-    ui = {'index.html': index.replace(app_name[1], 'app.js').replace(css_name[1], 'style.css'),
-          'app.js': app.replace(data_name[1], 'data.json'), 'style.css': css}
-    return data, ui
+    """The dashboard data a local site tree (a staged artifact) publishes, read through its index.html like a browser."""
+    return read_site_data(LocalSite(site))[0]
 
 
-def validate_dashboard(data):
-    if not isinstance(data, dict) or not isinstance(data.get('feeds'), list):
-        raise ValueError('invalid dashboard')
-    periods = set()
-    for feed in data['feeds']:
-        period = feed.get('period')
-        if feed.get('provider') != 'gittrend' or period not in ('day', 'week', 'month') or period in periods:
-            raise ValueError('foreign/duplicate feed')
-        periods.add(period)
-        if not isinstance(feed.get('rows'), list):
-            raise ValueError('invalid rows')
-        ids = set()
-        for row in feed['rows']:
-            if type(row.get('repo_id')) is not int or row['repo_id'] in ids or not isinstance(row.get('full_name'), str):
-                raise ValueError('invalid/duplicate provider identity')
-            ids.add(row['repo_id'])
-    if periods != {'day','week','month'}:
-        raise ValueError('all three separate periods required')
+def read_ui_source(site):
+    """The UI sources of the checkout: index.html must reference app.js and style.css plainly, app.js the three window files."""
+    source = LocalSite(site)
+    ui = {name: source.read(name).decode('utf-8') for name in ('index.html', 'app.js', 'style.css')}
+    if 'src="app.js"' not in ui['index.html'] or 'href="style.css"' not in ui['index.html']:
+        raise ValueError('index.html must reference app.js and style.css')
+    if any(f"'data-{period}.json'" not in ui['app.js'] for period in ('day', 'week', 'month')):
+        raise ValueError('app.js must reference data-day.json, data-week.json and data-month.json')
+    return ui
+
+
+def read_published(published, checkout, mode):
+    """What the last publication holds: {'source', 'data', 'snapshot', 'notes'}. The live site is authoritative; a refresh falls
+    back to the checkout's newest data file (carry-over only), a validate-current does not (re-publishing checkout data could roll
+    the live site back) and fails closed instead."""
+    notes = []
+    try:
+        data, _ = read_site_data(published)
+        source, site = f'live:{published}', published
+    except Exception as exc:  # noqa: BLE001 - any failure to read the live site is reported, never hidden
+        notes.append(f'live site unreadable: {type(exc).__name__}: {str(exc)[:200]}')
+        if mode != 'refresh':
+            raise ValueError(f'{mode} needs the live site; {notes[-1]}; current site unchanged') from exc
+        candidates = checkout_data_files(checkout)
+        if not candidates:
+            raise ValueError(f'no previous data: {notes[-1]} and the checkout holds no dashboard data file') from exc
+        data, site = candidates[0][2], LocalSite(checkout)
+        source = 'checkout:' + ','.join(candidates[0][1])
+    snapshot = None
+    snapshot_id = data.get('agent_snapshot_id')
+    if snapshot_id:
+        try:
+            snapshot = read_snapshot(site, snapshot_id, 'all' if mode != 'refresh' else 'records')
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f'published snapshot {snapshot_id[:12]} unreadable from {site}: {type(exc).__name__}: {str(exc)[:200]}')
+            if mode != 'refresh':
+                raise ValueError(f'{mode} needs the published snapshot; {notes[-1]}; current site unchanged') from exc
+    elif mode != 'refresh':
+        raise ValueError(f'{mode} needs published data that names its snapshot; current site unchanged')
+    return {'source': source, 'data': data, 'snapshot': snapshot, 'notes': notes}
 
 
 def bounded_problem(result, top):
@@ -277,53 +278,74 @@ def refresh_dashboard(current, client_factory=FeedClient, max_pages=1000, checkp
     return {'generated_at':dt.datetime.now(dt.timezone.utc).isoformat(),'feeds':results}
 
 
+PUBLIC_SOURCE_FILES = ('.nojekyll', 'llms.txt', 'docs/agent-feed.md', 'docs/weekly-refresh.yml')
+
+
 def copy_public_site(site, stage):
-    for path in pathlib.Path(site).iterdir():
+    """The artifact's hand-written files. UI assets are built from the sources, data and api/v1 are staged by the run: nothing
+    else in the checkout (historical data files, old snapshots, old hashed assets) is published."""
+    for name in PUBLIC_SOURCE_FILES:
+        path = pathlib.Path(site) / name
         if path.is_symlink():
             raise ValueError('symlinks are not publishable')
-        if path.is_file() and (path.name in ('index.html','.nojekyll','llms.txt') or re.fullmatch(r'(?:app|style|data)(?:\.[0-9a-f]+)?\.(?:js|css|json)',path.name)):
-            shutil.copyfile(path, stage/path.name)
-        elif path.is_dir() and path.name == 'api':
-            if any(p.is_symlink() for p in path.rglob('*')):
-                raise ValueError('symlink in API tree')
-            shutil.copytree(path,stage/path.name)
-        elif path.is_dir() and path.name == 'docs':
-            (stage/'docs').mkdir()
-            for name in ('agent-feed.md','weekly-refresh.yml'):
-                doc=path/name
-                if doc.is_file() and not doc.is_symlink(): shutil.copyfile(doc,stage/'docs'/name)
+        if path.is_file():
+            (stage / name).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(path, stage / name)
+
+
+def verified_feeds(data):
+    """The agent feed holds only each window's verified rows (the head read twice); a strict/whole-feed run has verified them all."""
+    feeds = [dict(f, rows=f['rows'][:f['coverage'].get('verified_rows', len(f['rows']))]) for f in data['feeds']]
+    return dict(data, feeds=feeds)
 
 
 def stage_site(site_dir, output_dir, mode='refresh', max_pages=1000, checkpoint_dir=None,
-               client_factory=FeedClient, export_builder=None, created_dates=fill_created_dates, top=None, depth='all', verify_top=2000):
+               client_factory=FeedClient, export_builder=None, created_dates=fill_created_dates, top=None, depth='all', verify_top=2000,
+               published=None):
+    """Stage the next site under output_dir: the checkout's UI sources plus either a fresh refresh (prior state from the published
+    site for carry-over and the shrink guard) or the published data and snapshot re-released with the current UI."""
     site, output = pathlib.Path(site_dir).resolve(), pathlib.Path(output_dir).resolve()
     if output.exists() or output == site or site in output.parents:
         raise ValueError('output must be a new directory outside current site')
     if mode not in ('refresh','validate-current'):
         raise ValueError('invalid mode')
-    current, ui = read_current(site)
-    from trending.agent_feed import hydrate_ui_index, build_ui_index
-    current = hydrate_ui_index(current, site)
-    data = refresh_dashboard(current,client_factory,max_pages,checkpoint_dir,top,depth=depth,verify_top=verify_top) if mode == 'refresh' else copy.deepcopy(current)
-    # New rows arrive without a GitHub creation date; ask GitHub (via gh) before publishing. Failures leave UNKNOWN.
-    created = created_dates(data) if mode == 'refresh' else None
+    if mode == 'refresh':
+        resolve_depth(top, depth, verify_top, max_pages)  # reject bad options before touching the published site
+    ui = read_ui_source(site)
+    from trending.agent_feed import METADATA_FIELDS, build_agent_exports, build_ui_files
+    prior = read_published(published if published is not None else LiveSite(), site, mode)
+    current, notes = prior['data'], list(prior['notes'])
+    if mode == 'refresh':
+        hydrated = hydrate_metadata(current, snapshot_records(prior['snapshot']), METADATA_FIELDS) if prior['snapshot'] else 0
+        notes.append(f'cached GitHub metadata carried for {hydrated} previously published rows')
+        seeds = seed_created_dates(checkout_data_files(site))
+        data = refresh_dashboard(current,client_factory,max_pages,checkpoint_dir,top,depth=depth,verify_top=verify_top,seeds=seeds)
+        # New rows arrive without a GitHub creation date; ask GitHub (via gh) before publishing. Failures leave UNKNOWN.
+        created = created_dates(data)
+    else:
+        data, created = copy.deepcopy(current), None
     output.parent.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.refresh-',dir=output.parent) as temp:
         temp=pathlib.Path(temp);stage=temp/'site';stage.mkdir();copy_public_site(site,stage)
-        if export_builder is None:
-            from trending.agent_feed import build_agent_exports
-            export_builder=build_agent_exports
-        catalog = export_builder(data,stage)
-        compact = build_ui_index(data,catalog)
+        if mode == 'refresh':
+            catalog = (export_builder or build_agent_exports)(verified_feeds(data),stage)
+        else:
+            catalog = write_snapshot(prior['snapshot'],stage)
         source=temp/'ui';source.mkdir()
         for name,value in ui.items(): (source/name).write_text(value)
-        (source/'data.json').write_text(json.dumps(compact,separators=(',',':'))+'\n')
+        sizes = {}
+        for period,payload in build_ui_files(data,catalog).items():
+            encoded=(json.dumps(payload,separators=(',',':'))+'\n').encode('utf-8');(source/f'data-{period}.json').write_bytes(encoded)
+            sizes[period]={'bytes':len(encoded),'gzip_bytes':len(gzip.compress(encoded,6))}
         subprocess.run([sys.executable,str(pathlib.Path(__file__).with_name('build_static_release.py')),
                         '--source',str(source),'--output',str(stage)],check=True,capture_output=True,text=True)
+        total=sum(p.stat().st_size for p in stage.rglob('*') if p.is_file())
         os.replace(stage,output)
     return {'mode':mode,'new_retrieval':mode=='refresh','depth':depth if mode == 'refresh' else None,'verify_top':verify_top if mode == 'refresh' else None,
-            'top':top if mode == 'refresh' else None,'output':str(output),'created_dates':created,
+            'top':top if mode == 'refresh' else None,'output':str(output),'previous_published':prior['source'],'notes':notes,'created_dates':created,
+            'artifact_bytes':total,'data_files':sizes,'snapshot_id':catalog['snapshot_id'],
             'periods':[{ 'period':f['period'],'rows':len(f['rows']),'status':f['coverage']['status'],'verified_rows':f['coverage'].get('verified_rows'),
+                        'created_at_known':sum(r.get('created_at') is not None for r in f['rows']),
                         'tail':f['coverage'].get('tail'),'verified_passes':f['coverage'].get('verified_passes'),'fetched_at_end':f['fetched_at_end']} for f in data['feeds']]}
 
 
@@ -342,9 +364,10 @@ def main():
     p.add_argument('--depth',type=depth_argument,default='all',help="rows per period: all (default, whole feed) or a multiple of 100 (today's bounded behaviour for that depth)")
     p.add_argument('--verify-top',type=int,default=2000,help='rows per period read twice and published only when both reads agree (multiple of 100, 100..10000)')
     p.add_argument('--top',type=int,default=None,help='alias for --depth N --verify-top N; 0 reads the whole feed under the strict rule')
+    p.add_argument('--published-site',default=LIVE_SITE,help='URL of the currently published site, read for carry-over (refresh) or re-release (validate-current)')
     p.add_argument('--checkpoint-dir');p.add_argument('--diagnostic');a=p.parse_args()
     try:
-        result=stage_site(a.site_dir,a.output_dir,a.mode,a.max_pages,a.checkpoint_dir,top=a.top,depth=a.depth,verify_top=a.verify_top);code=0
+        result=stage_site(a.site_dir,a.output_dir,a.mode,a.max_pages,a.checkpoint_dir,top=a.top,depth=a.depth,verify_top=a.verify_top,published=LiveSite(a.published_site));code=0
     except Exception as exc:
         result={'mode':a.mode,'status':'failed','error':f'{type(exc).__name__}: {str(exc)[:500]}','current_site_preserved':True};code=2
     if a.diagnostic:

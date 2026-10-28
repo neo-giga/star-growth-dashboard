@@ -7,7 +7,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from urllib.parse import urlparse
-from trending.agent_feed import build_agent_exports, build_ui_index, hydrate_ui_index
+from trending.agent_feed import build_agent_exports, build_ui_files
 
 
 def sample(n=2):
@@ -109,28 +109,23 @@ class AgentFeedTests(unittest.TestCase):
         self.assertEqual(r['identity']['provider_repo_id'],1)
         self.assertEqual(r['identity']['github_metadata_repo_id'],999)
         self.assertEqual(r['identity']['identity_match'],'case_insensitive_name_only')
-    def test_compact_index_links_and_hydration(self):
+    def test_window_files_hold_only_rendered_fields_in_gain_order(self):
         d=sample(105)
         d['feeds'][0]['rows'][0]['metadata']={'description':'hello','topics':[], 'github_repo_id':99, 'contributor_count':4, 'contributor_measured_at':'2026-10-25T00:00:00Z'}
         d['feeds'][0]['metadata_coverage']={'rights':'not blanket CC0'}
         c=build_agent_exports(d,self.root)
-        compact=build_ui_index(d,c)
-        for r in compact['feeds'][0]['rows']:
-            self.assertNotIn('metadata',r)
-            self.assertNotIn('observation',r)
-            self.assertIn(r['metadata_record_id'],[x['record_id'] for x in self.load(r['metadata_url'])['rows']])
-        hydrated=hydrate_ui_index(compact,self.root)
-        r=next(x for x in hydrated['feeds'][0]['rows'] if x['repo_id']==1)
-        self.assertEqual(r['metadata']['description'],'hello')
-        self.assertEqual(r['metadata']['contributor_measured_at'],'2026-10-25T00:00:00Z')
-        self.assertEqual(r['metadata']['github_repo_id'],99)
-        self.assertEqual(hydrated['feeds'][0]['metadata_coverage']['rights'],'not blanket CC0')
-        self.assertEqual(c,build_agent_exports(hydrated,self.root))
-    def test_hydration_external_url_refused(self):
-        d=sample(1);c=build_agent_exports(d,self.root);d=build_ui_index(d,c)
-        d['feeds'][0]['rows'][0]['metadata_url']='https://evil.test/page.json'
-        with self.assertRaisesRegex(ValueError,'outside site origin'):
-            hydrate_ui_index(d,self.root)
+        files=build_ui_files(d,c)
+        self.assertEqual(list(files),['week'])
+        week=files['week']
+        self.assertEqual(week['agent_snapshot_id'],c['snapshot_id']);self.assertEqual(week['agent_catalog_url'],'https://neo-giga.github.io/star-growth-dashboard/api/v1/catalog.json');self.assertEqual(week['generated_at'],d['generated_at'])
+        self.assertEqual(len(week['feeds']),1);feed=week['feeds'][0];self.assertEqual(feed['period'],'week');self.assertEqual(feed['metadata_coverage'],{'rights':'not blanket CC0'})
+        self.assertEqual([r['repo_id'] for r in feed['rows']][:3],[105,104,103])
+        for r in feed['rows']:
+            self.assertEqual(sorted(r),['created_at','created_at_github_repo_id','full_name','gain','language','repo_id','stars'])
+        self.assertEqual(d['feeds'][0]['rows'][0]['repo_id'],1)  # input untouched
+    def test_window_files_are_independent_of_the_snapshot_pages(self):
+        d=sample(3);c=build_agent_exports(d,self.root)
+        self.assertNotIn('metadata_url',json.dumps(build_ui_files(d,c)))
     def test_conflicting_github_ids(self):
         d=sample(1);r=d['feeds'][0]['rows'][0];r['created_at_github_repo_id']=3;r['metadata']={'github_repo_id':4}
         with self.assertRaisesRegex(ValueError,'conflicting'):
