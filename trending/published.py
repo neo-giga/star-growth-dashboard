@@ -26,6 +26,7 @@ DATA_FILE = re.compile(r'data(?:-(day|week|month))?(?:\.[0-9a-f]+)?\.json')
 API_URL = 'https://api.github.com'
 WORKFLOW = 'weekly-refresh.yml'
 PAGES_ARTIFACT = 'github-pages'
+DEPLOY_STEP = 'Deploy exact artifact'  # the workflow step that publishes; the same name in the pre-artifact workflow
 MAX_ARTIFACT_BYTES = 1024 ** 3  # GitHub Pages' published-site limit
 
 
@@ -126,24 +127,32 @@ def extract_pages_artifact(zip_path, target):
     tar_path.unlink()
 
 
+def deployed(repo, token, run_id, api=API_URL):
+    """Whether the run's latest attempt completed its deploy step (a run that carried a window deploys, then fails)."""
+    jobs = github_json(f'{api}/repos/{repo}/actions/runs/{run_id}/jobs?filter=latest&per_page=100', token)['jobs']
+    return any(step.get('name') == DEPLOY_STEP and step.get('conclusion') == 'success' for job in jobs for step in job.get('steps') or [])
+
+
 def latest_publication(repo, token, dest, api=API_URL):
-    """The site this workflow's newest successful run on main deployed, downloaded from its `github-pages` artifact into dest.
-    Raises when that run's artifact cannot be read: an older run's artifact is never used, it would roll the site back."""
-    runs = github_json(f'{api}/repos/{repo}/actions/workflows/{WORKFLOW}/runs?status=success&branch=main&per_page=20', token)['workflow_runs']
-    if not runs:
-        raise ValueError(f'no successful {WORKFLOW} run on main')
-    run = max(runs, key=lambda r: r.get('run_started_at') or r['created_at'])  # a re-run attempt deploys at its own start time
+    """The site this workflow last deployed: the newest completed run on main whose deploy step succeeded (whatever the run's own
+    conclusion), downloaded from its `github-pages` artifact into dest. Runs that never deployed never changed the site and are
+    skipped; when the deploying run's artifact cannot be read this raises: an older artifact would roll the site back."""
+    runs = github_json(f'{api}/repos/{repo}/actions/workflows/{WORKFLOW}/runs?status=completed&branch=main&per_page=20', token)['workflow_runs']
+    runs = sorted(runs, key=lambda r: r.get('run_started_at') or r['created_at'], reverse=True)  # a re-run attempt deploys at its own start
+    run = next((r for r in runs if deployed(repo, token, r['id'], api)), None)
+    if run is None:
+        raise ValueError(f'no {WORKFLOW} run among the last {len(runs)} on main deployed')
     listed = github_json(f'{api}/repos/{repo}/actions/runs/{run["id"]}/artifacts?name={PAGES_ARTIFACT}&per_page=100', token)['artifacts']
     usable = [a for a in listed if a.get('name') == PAGES_ARTIFACT and not a.get('expired')]
     if not usable:
-        raise ValueError(f'newest successful run {run["id"]} has no unexpired {PAGES_ARTIFACT} artifact')
+        raise ValueError(f'newest deploying run {run["id"]} has no unexpired {PAGES_ARTIFACT} artifact')
     artifact = max(usable, key=lambda a: a.get('created_at') or '')
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
     download_artifact(artifact['archive_download_url'], token, dest / 'artifact.zip')
     extract_pages_artifact(dest / 'artifact.zip', dest / 'site')
     (dest / 'artifact.zip').unlink()
-    return LocalSite(dest / 'site', label=f'artifact:run {run["id"]} ({run.get("event")}, {str(run.get("head_sha"))[:7]}, started {run.get("run_started_at")})')
+    return LocalSite(dest / 'site', label=f'artifact:run {run["id"]} ({run.get("event")}, {run.get("conclusion")}, {str(run.get("head_sha"))[:7]}, started {run.get("run_started_at")})')
 
 
 def validate_dashboard(data):

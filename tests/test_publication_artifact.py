@@ -21,8 +21,8 @@ def pages_zip(root):
  out=io.BytesIO()
  with zipfile.ZipFile(out,'w') as z:z.writestr('artifact.tar',tar.getvalue())
  return out.getvalue()
-def run(rid,started,event='schedule'):
- return {'id':rid,'event':event,'head_sha':f'{rid:040x}','created_at':started,'run_started_at':started,'conclusion':'success'}
+def run(rid,started,event='schedule',conclusion='success',deployed=True):
+ return {'id':rid,'event':event,'head_sha':f'{rid:040x}','created_at':started,'run_started_at':started,'conclusion':conclusion,'deployed':deployed}
 class FakeGitHub:
  def __init__(self,runs,artifacts,zips,cdn=None):
   self.runs,self.artifacts,self.zips,self.cdn=runs,artifacts,zips,cdn;self.hits=[]
@@ -38,7 +38,10 @@ class FakeGitHub:
     if parts[0]=='api':
      if self.headers.get('Authorization')!='Bearer tok':return self.send(401)
      if parts[1:7]==['repos','o','r','actions','workflows','weekly-refresh.yml'] and parts[7]=='runs':
-      assert (q['status'],q['branch'])==('success','main'),q;return self.send(200,json.dumps({'workflow_runs':outer.runs}).encode())
+      assert (q['status'],q['branch'])==('completed','main'),q;return self.send(200,json.dumps({'workflow_runs':outer.runs}).encode())
+     if parts[1:6]==['repos','o','r','actions','runs'] and parts[7]=='jobs':
+      r=next(r for r in outer.runs if r['id']==int(parts[6]));steps=[['Stage validated site without changing current files','success' if r['deployed'] or r['conclusion']=='success' else 'failure'],['Deploy exact artifact','success' if r['deployed'] else 'skipped']]
+      return self.send(200,json.dumps({'jobs':[{'name':'refresh-and-publish','steps':[{'name':n,'conclusion':c} for n,c in steps]}]}).encode())
      if parts[1:6]==['repos','o','r','actions','runs'] and parts[7]=='artifacts':
       return self.send(200,json.dumps({'artifacts':[a for a in outer.artifacts.get(int(parts[6]),[]) if a['name']==q.get('name')]}).encode())
      if parts[1:6]==['repos','o','r','actions','artifacts'] and parts[7]=='zip':
@@ -77,7 +80,7 @@ class ArtifactPublicationTests(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    old=old_format_site(tmp,current());gh=self.serve([run(40710274815,'2026-10-28T14:52:39Z','workflow_dispatch')],{40710274815:[artifact(12825067811)]},{12825067811:pages_zip(old)})
    site=latest_publication('o/r','tok',pathlib.Path(tmp)/'dl',api=gh.url('api'))
-   self.assertEqual(str(site),'artifact:run 40710274815 (workflow_dispatch, 0000000, started 2026-10-28T14:52:39Z)');self.assertEqual(gh.count('/blob/'),1)
+   self.assertEqual(str(site),'artifact:run 40710274815 (workflow_dispatch, success, 0000000, started 2026-10-28T14:52:39Z)');self.assertEqual(gh.count('/blob/'),1)
    out=pathlib.Path(tmp)/'output';result=w.stage_site(checkout(tmp),out,'validate-current',client_factory=lambda **kw:self.fail('network'),published=site)
    self.assertEqual(result['snapshot_id'],json.loads((old/'api/v1/catalog.json').read_text())['snapshot_id']);self.assertEqual(result['previous_published'],str(site))
    self.assertEqual([len(f['rows']) for f in w.read_current(out)['feeds']],[1,1,1]);self.assertEqual((out/'api/v1/catalog.json').read_bytes(),(old/'api/v1/catalog.json').read_bytes())
@@ -99,11 +102,23 @@ class ArtifactPublicationTests(unittest.TestCase):
    gh=self.serve([run(1,'2026-10-28T07:00:00Z'),run(2,'2026-10-29T07:00:00Z')],{1:[artifact(11)],2:[artifact(22,expired=True)]},{11:pages_zip(pub)},cdn=pub)
    code,diag=self.cli(gh,tmp)
    self.assertEqual(code,2);self.assertTrue(diag['current_site_preserved']);self.assertFalse((pathlib.Path(tmp)/'output').exists())
-   self.assertIn('publication artifact unreadable: ValueError: newest successful run 2 has no unexpired github-pages artifact; current site unchanged',diag['error'])
+   self.assertIn('publication artifact unreadable: ValueError: newest deploying run 2 has no unexpired github-pages artifact; current site unchanged',diag['error'])
    self.assertEqual(gh.count('/blob/'),0);self.assertEqual(gh.count('/cdn/'),0)  # an older run's artifact would roll the site back
    code,diag=self.cli(gh,tmp,'--bootstrap-from-live')
    self.assertEqual(code,0,diag);self.assertEqual(diag['previous_published'],gh.url('cdn/'));self.assertGreater(gh.count('/cdn/'),0)
-   self.assertTrue(diag['notes'][0].startswith('bootstrap_from_live: publication artifact unreadable: ValueError: newest successful run 2'),diag['notes'])
+   self.assertTrue(diag['notes'][0].startswith('bootstrap_from_live: publication artifact unreadable: ValueError: newest deploying run 2'),diag['notes'])
+ def test_a_partial_run_that_deployed_then_failed_is_the_publication_a_run_that_never_deployed_is_not(self):
+  # A refresh that carried a window deploys the other windows and then fails the run (exit 3). Its artifact is what is live; a
+  # run that failed before deploying changed nothing. Reading only status=success runs would re-release the older publication.
+  with tempfile.TemporaryDirectory() as tmp:
+   older=publish(tmp,current(),name='older');partial_data=current()
+   for f in partial_data['feeds'][:2]:f['rows'][0]['stars']=300;f['fetched_at_end']='2026-10-29T00:00:00Z'
+   partial=publish(tmp,partial_data,name='partial')
+   gh=self.serve([run(1,'2026-10-28T07:00:00Z'),run(2,'2026-10-29T07:00:00Z',conclusion='failure',deployed=True),run(3,'2026-10-29T09:00:00Z',conclusion='failure',deployed=False)],
+                 {1:[artifact(11)],2:[artifact(22)],3:[]},{11:pages_zip(older),22:pages_zip(partial)},cdn=older)
+   code,diag=self.cli(gh,tmp)
+   self.assertEqual(code,0,diag);self.assertTrue(diag['previous_published'].startswith('artifact:run 2 (schedule, failure, '),diag['previous_published'])
+   self.assertEqual(diag['snapshot_id'],w.read_current(partial)['agent_snapshot_id']);self.assertEqual(gh.count('/blob/'),1);self.assertEqual(gh.count('/cdn/'),0)
  def test_outside_actions_an_explicit_source_is_required(self):
   with tempfile.TemporaryDirectory() as tmp:
    pub=publish(tmp,current());gh=self.serve([],{},{},cdn=pub)
