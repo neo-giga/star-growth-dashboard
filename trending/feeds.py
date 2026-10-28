@@ -140,8 +140,9 @@ def normalize(row):
             'url': 'https://github.com/' + name}
 
 
-def collect_feed(client, period, limit=100, max_pages=1000):
-    if period not in PERIODS.values() or not 1 <= limit <= 100 or max_pages < 1:
+def collect_feed(client, period, limit=100, max_pages=1000, first_page=1, keep_first=False):
+    """first_page > 1 reads a tail continuing an earlier read; keep_first keeps a duplicate ID's best-ranked row."""
+    if period not in PERIODS.values() or not 1 <= limit <= 100 or max_pages < 1 or first_page < 1:
         raise ValueError('invalid period/limit/max_pages')
     started = utcnow()
     rows, pages, warnings = {}, [], []
@@ -149,7 +150,7 @@ def collect_feed(client, period, limit=100, max_pages=1000):
     first_total = None
     reached_end = False
     failure = None
-    for page in range(1, max_pages + 1):
+    for page in range(first_page, first_page + max_pages):
         requested_at = utcnow()
         try:
             payload = client.page(period, page, limit)
@@ -180,6 +181,8 @@ def collect_feed(client, period, limit=100, max_pages=1000):
                                       'source_as_of': None}
                 if row['repo_id'] in rows:
                     duplicates += 1
+                    if keep_first:
+                        continue
                 rows[row['repo_id']] = row
             pages.append({'page': page, 'total': total, 'returned': len(items), 'requested_at': requested_at})
             if not has_more:
@@ -198,8 +201,8 @@ def collect_feed(client, period, limit=100, max_pages=1000):
     if ambiguous_slugs:
         warnings.append(f'{ambiguous_slugs} repository slugs have conflicting provider IDs; identities not merged')
     if duplicates:
-        warnings.append(f'{duplicates} duplicate provider IDs across pages; latest observed row retained')
-    if reached_end and (len(rows) != first_total):
+        warnings.append(f'{duplicates} duplicate provider IDs across pages; {"best-ranked" if keep_first else "latest"} observed row retained')
+    if reached_end and first_page == 1 and (len(rows) != first_total):
         warnings.append(f'unique rows {len(rows)} do not match initial provider total {first_total}')
     status = 'inconsistent' if warnings else ('complete' if reached_end and failure is None else 'partial')
     if failure:
