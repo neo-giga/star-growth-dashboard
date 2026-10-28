@@ -6,7 +6,9 @@ Public cached GitHub metadata is carried only for same period/provider ID/name.
 from __future__ import annotations
 import argparse, copy, datetime as dt, json, os, pathlib, re, shutil, subprocess, sys, tempfile, time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from trending.feeds import FeedClient, collect_feed
+from fill_created_dates import fill_created_dates
 
 
 def local_asset(root, name):
@@ -125,7 +127,7 @@ def copy_public_site(site, stage):
 
 
 def stage_site(site_dir, output_dir, mode='refresh', max_pages=1000, checkpoint_dir=None,
-               client_factory=FeedClient, export_builder=None):
+               client_factory=FeedClient, export_builder=None, created_dates=fill_created_dates):
     site, output = pathlib.Path(site_dir).resolve(), pathlib.Path(output_dir).resolve()
     if output.exists() or output == site or site in output.parents:
         raise ValueError('output must be a new directory outside current site')
@@ -135,6 +137,8 @@ def stage_site(site_dir, output_dir, mode='refresh', max_pages=1000, checkpoint_
     from trending.agent_feed import hydrate_ui_index, build_ui_index
     current = hydrate_ui_index(current, site)
     data = refresh_dashboard(current,client_factory,max_pages,checkpoint_dir) if mode == 'refresh' else copy.deepcopy(current)
+    # New rows arrive without a GitHub creation date; ask GitHub (via gh) before publishing. Failures leave UNKNOWN.
+    created = created_dates(data) if mode == 'refresh' else None
     output.parent.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.refresh-',dir=output.parent) as temp:
         temp=pathlib.Path(temp);stage=temp/'site';stage.mkdir();copy_public_site(site,stage)
@@ -149,7 +153,7 @@ def stage_site(site_dir, output_dir, mode='refresh', max_pages=1000, checkpoint_
         subprocess.run([sys.executable,str(pathlib.Path(__file__).with_name('build_static_release.py')),
                         '--source',str(source),'--output',str(stage)],check=True,capture_output=True,text=True)
         os.replace(stage,output)
-    return {'mode':mode,'new_retrieval':mode=='refresh','output':str(output),
+    return {'mode':mode,'new_retrieval':mode=='refresh','output':str(output),'created_dates':created,
             'periods':[{ 'period':f['period'],'rows':len(f['rows']),'status':f['coverage']['status'],
                         'fetched_at_end':f['fetched_at_end']} for f in data['feeds']]}
 
