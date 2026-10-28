@@ -112,6 +112,30 @@ class FeedTests(unittest.TestCase):
             c.page('week', 1, 100)
         self.assertEqual(len(f.urls), 2)
 
+    def test_503_three_times_then_success_recovers_with_the_long_backoff(self):
+        # 2026-10-28: month page 176 answered 503 three times within ~3 s and ended two live runs; it read fine later.
+        error = HTTPError('https://example.invalid', 503, 'unavailable', {}, None)
+        waits = []
+        c = FeedClient(fetch=QueueFetch(error, error, error, page([repo()])), sleeper=waits.append)
+        self.assertEqual(c.page('month', 176, 100)['data'][0]['id'], 1)
+        self.assertEqual((waits, c.retries, c.requests), ([5, 15, 30], 3, 4))
+        waits.clear()
+        c = FeedClient(fetch=QueueFetch(*[error] * 6), sleeper=waits.append)
+        with self.assertRaises(HTTPError):
+            c.page('month', 176, 100)
+        self.assertEqual(waits, [5, 15, 30, 60, 120])
+
+    def test_retry_after_is_honoured_up_to_300_seconds(self):
+        waits = []
+        slow = HTTPError('https://example.invalid', 429, 'slow down', {'Retry-After': '240'}, None)
+        c = FeedClient(fetch=QueueFetch(slow, page([repo()])), sleeper=waits.append)
+        self.assertEqual(c.page('week', 1, 100)['data'][0]['id'], 1)
+        self.assertEqual(waits, [240])
+        too_slow = HTTPError('https://example.invalid', 429, 'slow down', {'Retry-After': '301'}, None)
+        c = FeedClient(fetch=QueueFetch(too_slow), sleeper=waits.append)
+        with self.assertRaisesRegex(ValueError, 'delay above 300 seconds'):
+            c.page('week', 1, 100)
+
     def test_numeric_strings_and_missing_negative_gains(self):
         result = self.collect([repo(1, stars='10000', gain='9'), repo(2, stars='900', gain='100'),
                                repo(3, stars='500', gain=None), repo(4, stars='800', gain='-2')])
