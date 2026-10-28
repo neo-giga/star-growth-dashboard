@@ -53,7 +53,7 @@ class WeeklyRefreshTests(unittest.TestCase):
    self.assertEqual(data['agent_snapshot_id'],w.read_current(pub)['agent_snapshot_id']);self.assertFalse((out/'private-note.txt').exists())
    snapshot=[p for p in listing(pub) if p.startswith('api/')];self.assertEqual([p for p in listing(out) if p.startswith('api/')],snapshot)
    for name in snapshot:self.assertEqual((out/name).read_bytes(),(pub/name).read_bytes(),name)
-   self.assertEqual(served.requests,2+3+3+len([p for p in snapshot if '/snapshots/' in p and not p.endswith('schema.json')]))  # index, app, 3 windows, catalog+manifest+schema, snapshot files
+   self.assertEqual(served.requests,2+3+3+len([p for p in snapshot if '/snapshots/' in p and not p.endswith('schema.json')])+6)  # index, app, 3 windows, catalog+manifest+schema, snapshot files; previous generation: index, app, style, 3 windows
    self.assertEqual(sorted(p for p in listing(out) if not p.startswith(('api/','app.','data-','style.'))),['.nojekyll','docs/agent-feed.md','index.html','llms.txt'])
  def test_validate_current_fails_closed_without_the_previous_publication(self):
   with tempfile.TemporaryDirectory() as tmp:
@@ -96,7 +96,7 @@ class WeeklyRefreshTests(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    site=checkout(tmp);pub=publish(tmp,current());out=pathlib.Path(tmp)/'output';served=live(pub)
    with patch.object(w.time,'sleep',lambda s:None):result=w.stage_site(site,out,'refresh',client_factory=factory(),created_dates=lambda data:{'requested':0},published=served)
-   self.assertIn('published snapshot records (cached GitHub metadata) attached to 3 previously published rows',result['notes']);self.assertEqual(served.requests,2+3+2+3)  # index, app, 3 windows, catalog, manifest, the snapshot's three all.jsonl files only
+   self.assertIn('published snapshot records (cached GitHub metadata) attached to 3 previously published rows',result['notes']);self.assertEqual(served.requests,2+3+2+3+6)  # index, app, 3 windows, catalog, manifest, the snapshot's three all.jsonl files only; previous generation: index, app, style, 3 windows
    records=snapshot_records(read_snapshot(LocalSite(out),result['snapshot_id'],'records'))
    r=records['week']['gittrend:1'];self.assertEqual(r['metadata']['description'],'cached');self.assertEqual(r['provenance']['metadata_observed_at'],'2025-12-01T00:00:00Z');self.assertEqual(r['identity']['github_metadata_repo_id'],99)
    broken=publish(tmp,current(),name='broken');(broken/'api/v1/catalog.json').write_text('{"snapshot_id":"0000"}')
@@ -129,7 +129,7 @@ class WeeklyRefreshTests(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    site=checkout(tmp)
    with self.assertRaises(ValueError):w.stage_site(site,site,'validate-current')
- def test_artifact_holds_only_the_latest_snapshot_and_the_current_assets(self):
+ def test_artifact_holds_only_the_latest_snapshot_the_current_assets_and_one_previous_generation(self):
   with tempfile.TemporaryDirectory() as tmp:
    site=checkout(tmp,('data.3d500242a0406175.json',prior(5)),('data.json',prior(5)));old=publish(tmp,prior(5),name='old');(site/'docs'/'weekly-refresh.yml').write_text('name: x')
    for name in listing(old):  # the checkout still holds yesterday's artifact (its index.html stays the source)
@@ -139,7 +139,15 @@ class WeeklyRefreshTests(unittest.TestCase):
    files=listing(out);snapshots={p.split('/')[3] for p in files if p.startswith('api/v1/snapshots/')}
    self.assertEqual(snapshots,{result['snapshot_id']});self.assertNotEqual(result['snapshot_id'],w.read_current(old)['agent_snapshot_id'])
    self.assertEqual([p for p in files if not p.startswith(('api/','app.','data-','style.'))],['.nojekyll','docs/agent-feed.md','docs/weekly-refresh.yml','index.html','llms.txt'])
-   self.assertEqual(len([p for p in files if p.startswith('app.')]),1);self.assertEqual(sorted(p.split('.')[0] for p in files if p.startswith('data-')),['data-day','data-month','data-week'])
+   current=w.read_site_data(LocalSite(out))[1];previous=w.read_site_data(LocalSite(pub))[1]
+   self.assertEqual(sorted(p for p in files if p.startswith(('app.','data-','style.'))),sorted([current['app'],previous['app'],*current['data'].values(),*previous['data'].values()]+[p for p in listing(pub) if p.startswith('style.')]))
+   self.assertEqual(result['previous_generation'],sorted([previous['app'],*previous['data'].values()]+[p for p in listing(pub) if p.startswith('style.')]))
+   for name in result['previous_generation']:self.assertEqual((out/name).read_bytes(),(pub/name).read_bytes())  # yesterday's tab still finds its files
+   self.assertNotIn('app.844cb05d8617d41a.js',files)  # the checkout's frozen assets are never published
+   later=pathlib.Path(tmp)/'later'
+   with patch.object(w.time,'sleep',lambda s:None):w.stage_site(site,later,'refresh',client_factory=Provider(6).factory,created_dates=lambda data:{'requested':0},published=LocalSite(out))
+   older_only=set(result['previous_generation'])-{current['app'],*current['data'].values()}-{p for p in listing(out) if p.startswith('style.')}
+   self.assertTrue(older_only);self.assertFalse(older_only&set(listing(later)))  # one generation only: the day before yesterday's own files are gone
    self.assertEqual(result['artifact_bytes'],sum((out/p).stat().st_size for p in files));self.assertEqual(sorted(result['data_files']),['day','month','week']);self.assertGreater(result['data_files']['week']['bytes'],result['data_files']['week']['gzip_bytes'])
  def test_agent_feed_exports_only_the_verified_head(self):
   with tempfile.TemporaryDirectory() as tmp:
@@ -373,12 +381,15 @@ class TwoTierRefreshTests(unittest.TestCase):
     proc=subprocess.run([sys.executable,str(ROOT/'scripts/weekly_refresh.py'),'--site-dir',str(site),'--output-dir',str(out),'--published-site',NO_SITE,*args],capture_output=True,text=True)
     self.assertNotEqual(proc.returncode,0,args);self.assertFalse(out.exists())
  def test_staged_artifact_for_the_full_lists_stays_far_under_300_mb(self):
-  # 12,195 + 32,694 + 66,772 rows (the 2026-10-28 provider totals) through the real staging: three window files, one snapshot of the
-  # verified heads only. GitHub Pages' site limit is 1 GB; a full-row snapshot per day would have been ~390 MB.
+  # 12,195 + 32,694 + 66,772 rows (the 2026-10-28 provider totals) through the real staging, twice so the second artifact also carries
+  # the first one's full window files as its previous generation: six window files, one snapshot of the verified heads only.
+  # GitHub Pages' site limit is 1 GB; a full-row snapshot per day would have been ~390 MB.
   with tempfile.TemporaryDirectory() as tmp:
-   site=checkout(tmp);pub=publish(tmp,prior(2000));out=pathlib.Path(tmp)/'output';p=Provider(0,totals=self.TOTALS)
-   with patch.object(w.time,'sleep',lambda s:None):result=w.stage_site(site,out,'refresh',client_factory=p.factory,created_dates=lambda data:{'requested':0},published=live(pub))
-   self.assertEqual([x['rows'] for x in result['periods']],[12195,32694,66772]);self.assertLess(result['artifact_bytes'],300*1024*1024)
+   site=checkout(tmp);pub=publish(tmp,prior(2000));first=pathlib.Path(tmp)/'first';out=pathlib.Path(tmp)/'output'
+   with patch.object(w.time,'sleep',lambda s:None):
+    w.stage_site(site,first,'refresh',client_factory=Provider(0,totals=self.TOTALS).factory,created_dates=lambda data:{'requested':0},published=live(pub))
+    result=w.stage_site(site,out,'refresh',client_factory=Provider(0,totals={k:v+1 for k,v in self.TOTALS.items()}).factory,created_dates=lambda data:{'requested':0},published=LocalSite(first))
+   self.assertEqual([x['rows'] for x in result['periods']],[12196,32695,66773]);self.assertLess(result['artifact_bytes'],300*1024*1024)
    self.assertLess(sum(f.stat().st_size for f in (out/'api').rglob('*') if f.is_file()),40*1024*1024)
-   self.assertEqual(len(list((out/'api/v1/snapshots').iterdir())),1);self.assertEqual(len([n for n in out.iterdir() if n.name.startswith('data-')]),3)
+   self.assertEqual(len(list((out/'api/v1/snapshots').iterdir())),1);self.assertEqual(len([n for n in out.iterdir() if n.name.startswith('data-')]),6)
    print(f"\nartifact {result['artifact_bytes']/1e6:.1f} MB for {sum(x['rows'] for x in result['periods'])} rows; window files {result['data_files']}")

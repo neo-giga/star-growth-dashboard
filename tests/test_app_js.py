@@ -57,3 +57,7 @@ class AppJsTests(unittest.TestCase):
    [[1],{'day':'data-day.json','week':'data-week.json','month':'data-month.json'},'The local data file does not hold exactly one week feed.','The local data file has an invalid format.'])
  def test_count_loader_rejects_unsafe_names_without_fetching(self):
   self.assertEqual(run('''(async()=>{let n=0;const load=app.createCountLoader(async()=>{n++;},{getItem:()=>null,setItem(){}});try{await load('../evil');console.log('no')}catch(e){console.log(JSON.stringify([e.message,n,app.apiRepoPath('o/.'),app.apiRepoPath('a/b c'),app.apiRepoPath('morluto/rea')]))}})()'''),['Invalid repository name',0,None,None,'morluto/rea'])
+ def test_reload_once_per_missing_data_file(self):
+  script='''const m=new Map(),s={getItem:k=>m.get(k)??null,setItem:(k,v)=>m.set(k,v)},broken={getItem(){throw new Error('denied')},setItem(){}},full={getItem:()=>null,setItem(){throw new Error('quota')}};
+   console.log(JSON.stringify([app.reloadOnceFor(s,'data-month.a.json'),app.reloadOnceFor(s,'data-month.a.json'),app.reloadOnceFor(s,'data-day.b.json'),app.reloadOnceFor(null,'x'),app.reloadOnceFor(broken,'x'),app.reloadOnceFor(full,'x')]))'''
+  self.assertEqual(run(script),[True,False,True,False,False,False])

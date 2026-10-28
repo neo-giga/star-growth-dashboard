@@ -138,12 +138,25 @@ function parseFeed(data, period) {
   if (feeds.length !== 1) throw new Error(`The local data file does not hold exactly one ${period} feed.`);
   return feeds[0];
 }
-if (typeof module !== 'undefined') module.exports = {numeric, creationTime, creationLabel, selectRows, repoURL, displayNumber, timeLabel, clockLabel, metadataFields, linkCount, countOutcome, repoOutcome, countLabel, apiRepoPath, createCountLoader, parseFeed, GITHUB_COUNTS, DATA_FILES};
+/* A tab opened before a later deploy asks for a data file that is gone (404): reload index.html once per missing file name, never again
+   for the same name, so a deploy that is itself broken shows the error instead of looping. Needs real sessionStorage to remember. */
+const RELOADED_KEY = 'reloaded-for-missing';
+function reloadOnceFor(session, name) {
+  if (!session) return false;
+  try {
+    const tried = JSON.parse(session.getItem(RELOADED_KEY) || '[]');
+    if (!Array.isArray(tried) || tried.includes(name)) return false;
+    session.setItem(RELOADED_KEY, JSON.stringify([...tried, name].slice(-20)));
+    return JSON.parse(session.getItem(RELOADED_KEY)).includes(name);
+  } catch (_) { return false; }
+}
+if (typeof module !== 'undefined') module.exports = {numeric, creationTime, creationLabel, selectRows, repoURL, displayNumber, timeLabel, clockLabel, metadataFields, linkCount, countOutcome, repoOutcome, countLabel, apiRepoPath, createCountLoader, parseFeed, reloadOnceFor, GITHUB_COUNTS, DATA_FILES};
 if (typeof document !== 'undefined') {
   const el = id => document.getElementById(id);
   const loaded = {}, pending = {};
   let page = 1;
-  const memory = new Map(), storage = (() => { try { return window.sessionStorage; } catch (_) { return null; } })() || {getItem: key => memory.get(key) ?? null, setItem: (key, value) => memory.set(key, value)};
+  const session = (() => { try { return window.sessionStorage; } catch (_) { return null; } })();
+  const memory = new Map(), storage = session || {getItem: key => memory.get(key) ?? null, setItem: (key, value) => memory.set(key, value)};
   const loadCounts = createCountLoader((...args) => fetch(...args), storage);
   const node = (tag, text, className) => {
     const element = document.createElement(tag);
@@ -154,6 +167,7 @@ if (typeof document !== 'undefined') {
   function currentFeed() { return loaded[el('period').value]; }
   function loadPeriod(period) {
     if (!pending[period]) pending[period] = fetch(DATA_FILES[period], {cache: 'no-store'}).then(response => {
+      if (response.status === 404 && reloadOnceFor(session, DATA_FILES[period])) { location.reload(); return new Promise(() => {}); }
       if (!response.ok) throw new Error(`Data request failed (${response.status}).`);
       return response.json();
     }).then(data => { loaded[period] = parseFeed(data, period); return loaded[period]; }).catch(error => { delete pending[period]; throw error; });

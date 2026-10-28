@@ -9,7 +9,7 @@ reach the provider's end with at least TAIL_COVERAGE of the reported total. --to
 Public cached GitHub metadata is carried only for same period/provider ID/name.
 """
 from __future__ import annotations
-import argparse, copy, datetime as dt, gzip, json, math, os, pathlib, shutil, subprocess, sys, tempfile, time
+import argparse, copy, datetime as dt, gzip, json, math, os, pathlib, re, shutil, subprocess, sys, tempfile, time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from trending.feeds import FeedClient, collect_feed
@@ -293,6 +293,21 @@ def copy_public_site(site, stage):
             shutil.copyfile(path, stage / name)
 
 
+HASHED_ASSET = re.compile(r'(?:app|style|data(?:-(?:day|week|month))?)\.[0-9a-f]{16}\.(?:js|css|json)')
+
+
+def previous_generation(prior):
+    """{name: bytes} of the hashed app, stylesheet and data files the previous publication's index.html serves, so a tab opened before
+    this deploy can still switch windows. Only that one generation is carried: the next run carries this run's, never older ones."""
+    site, files = prior['site'], prior['files']
+    styles = re.findall(r'<link[^>]+href="([^"]+\.css)"', site.read('index.html').decode('utf-8'))
+    carried = {}
+    for name in [files['app'], *styles, *files['data'].values()]:
+        if HASHED_ASSET.fullmatch(name):
+            carried[name] = site.read(name)
+    return carried
+
+
 def verified_feeds(data):
     """The agent feed holds only each window's verified rows (the head read twice); a strict/whole-feed run has verified them all."""
     feeds = [dict(f, rows=f['rows'][:f['coverage'].get('verified_rows', len(f['rows']))]) for f in data['feeds']]
@@ -330,6 +345,8 @@ def stage_site(site_dir, output_dir, mode='refresh', max_pages=1000, checkpoint_
     output.parent.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.refresh-',dir=output.parent) as temp:
         temp=pathlib.Path(temp);stage=temp/'site';stage.mkdir();copy_public_site(site,stage)
+        carried=previous_generation(prior)
+        for name,value in carried.items():(stage/name).write_bytes(value)
         if mode == 'refresh':
             catalog = (export_builder or build_agent_exports)(verified_feeds(data),stage)
         else:
@@ -346,7 +363,7 @@ def stage_site(site_dir, output_dir, mode='refresh', max_pages=1000, checkpoint_
         os.replace(stage,output)
     return {'mode':mode,'new_retrieval':mode=='refresh','depth':depth if mode == 'refresh' else None,'verify_top':verify_top if mode == 'refresh' else None,
             'top':top if mode == 'refresh' else None,'output':str(output),'previous_published':prior['source'],'notes':notes,'created_dates':created,
-            'artifact_bytes':total,'data_files':sizes,'snapshot_id':catalog['snapshot_id'],
+            'artifact_bytes':total,'data_files':sizes,'snapshot_id':catalog['snapshot_id'],'previous_generation':sorted(carried),
             'periods':[{ 'period':f['period'],'rows':len(f['rows']),'status':f['coverage']['status'],'verified_rows':f['coverage'].get('verified_rows'),
                         'created_at_known':sum(r.get('created_at') is not None for r in f['rows']),
                         'tail':f['coverage'].get('tail'),'verified_passes':f['coverage'].get('verified_passes'),'fetched_at_end':f['fetched_at_end']} for f in data['feeds']]}
