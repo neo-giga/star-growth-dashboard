@@ -333,6 +333,23 @@ def hydrate_metadata(data, records, metadata_fields):
     return hydrated
 
 
+def restore_observations(data, records):
+    """Give previously published rows that lack it (the compact window files hold none) the provider observation their snapshot
+    record holds: page, source URL and fetch time, unchanged, so a window carried into the next publication exports the same
+    provenance instead of nulls. Same period, provider ID and name only. Returns the number of rows restored."""
+    restored = 0
+    for feed in data.get('feeds', []):
+        for row in feed.get('rows', []):
+            record = records.get(feed['period'], {}).get(f"gittrend:{row['repo_id']}")
+            if row.get('observation') or not record or record['identity'].get('full_name') != row['full_name']:
+                continue
+            p = record.get('provenance') or {}
+            row['observation'] = {'provider': 'gittrend', 'period': feed['period'], 'page': p.get('provider_page'),
+                                  'fetched_at': p.get('fetched_at'), 'source_url': p.get('source_url'), 'source_as_of': p.get('source_as_of')}
+            restored += 1
+    return restored
+
+
 def write_snapshot(snapshot, stage):
     """Place a verified snapshot (as read_snapshot returns it with want='all') under stage/api/v1 and return its catalog."""
     root = Path(stage) / 'api/v1'

@@ -13,7 +13,7 @@ import argparse, copy, datetime as dt, gzip, json, math, os, pathlib, re, shutil
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from trending.feeds import FeedClient, collect_feed
-from trending.published import (LIVE_SITE, LiveSite, LocalSite, checkout_data_files, hydrate_metadata, latest_publication, read_site_data,
+from trending.published import (LIVE_SITE, LiveSite, LocalSite, checkout_data_files, hydrate_metadata, latest_publication, read_site_data, restore_observations,
                                 read_snapshot, seed_created_dates, snapshot_records, validate_dashboard, write_snapshot)
 from fill_created_dates import fill_created_dates
 # GitTrend answers with Cache-Control: s-maxage=300, stale-while-revalidate=600, so a shared cache may replay a response
@@ -464,8 +464,12 @@ def stage_site(site_dir, output_dir, mode='refresh', max_pages=1000, checkpoint_
     prior = read_published(published, mode)
     current, notes = prior['data'], list(prior['notes'])
     if mode == 'refresh':
-        hydrated = hydrate_metadata(current, snapshot_records(prior['snapshot']), METADATA_FIELDS) if prior['snapshot'] else 0
+        records = snapshot_records(prior['snapshot']) if prior['snapshot'] else {}
+        hydrated = hydrate_metadata(current, records, METADATA_FIELDS)
+        # A window that cannot be refreshed is carried from these rows; its records keep their original provider provenance.
+        observed = restore_observations(current, records)
         notes.append(f'published snapshot records (cached GitHub metadata) attached to {hydrated} previously published rows')
+        notes.append(f'published snapshot records (provider page, source URL, fetch time) restored on {observed} previously published rows')
         seeds = seed_created_dates(checkout_data_files(site))
         data = refresh_dashboard(current,client_factory,max_pages,checkpoint_dir,top,depth=depth,verify_top=verify_top,seeds=seeds,
                                  deadline_minutes=deadline_minutes)

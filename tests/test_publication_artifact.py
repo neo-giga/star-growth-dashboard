@@ -3,10 +3,10 @@
 A local HTTP server plays the GitHub REST API (runs, artifacts, the zip redirect), the pre-signed storage URL (which refuses the
 GitHub token) and a stale CDN copy of the site; the real urllib/zip/tar path is exercised end to end.
 """
-import contextlib,http.server,io,json,os,pathlib,shutil,sys,tarfile,tempfile,threading,unittest,urllib.parse,zipfile
+import contextlib,http.server,io,json,os,pathlib,shutil,sys,tarfile,tempfile,threading,unittest,urllib.error,urllib.parse,zipfile
 from unittest.mock import patch
 from trending.agent_feed import build_agent_exports
-from trending.published import LocalSite,extract_pages_artifact,latest_publication
+from trending.published import LocalSite,extract_pages_artifact,latest_publication,read_snapshot,snapshot_records
 from test_weekly_refresh import ROOT,checkout,current,publish,w
 OLD_APP='app.844cb05d8617d41a.js'  # the app the 2026-10-28 publication (run 40710274815) serves: one data.<hash>.json for all windows
 def old_format_site(tmp,data,name='old-format'):
@@ -162,3 +162,42 @@ class ArtifactPublicationTests(unittest.TestCase):
    with zipfile.ZipFile(path,'w') as z:z.writestr('artifact.tar',tar.getvalue())
    with self.assertRaises(tarfile.TarError):extract_pages_artifact(path,pathlib.Path(tmp)/'site')
    self.assertFalse((pathlib.Path(tmp)/'escape.txt').exists())
+OLD_ARTIFACT=pathlib.Path(os.environ.get('SGD_OLD_ARTIFACT','/tmp/sgd-r2-art/site'))  # run 40710274815's github-pages artifact, extracted
+PROVENANCE=('provider_page','source_url','fetched_at')
+class CarriedProvenanceTests(unittest.TestCase):
+ """Codex full-lists review 2 #2: the old window data files hold no observation, so a carried window exported null provenance."""
+ def carry_month(self,tmp,published):
+  from test_weekly_refresh import Provider
+  from trending.feeds import FeedClient
+  p=Provider(12195)
+  def fetch(url):
+   if 'time=month' in url:raise urllib.error.HTTPError(url,503,'Service Unavailable',{},None)
+   return p(url)
+  out=pathlib.Path(tmp)/'output'
+  with patch.object(w.time,'sleep',lambda s:None):
+   result=w.stage_site(checkout(tmp,name='co'),out,'refresh',client_factory=lambda **kw:FeedClient(fetch=fetch,**kw),created_dates=lambda d:{'requested':0},published=published)
+  self.assertEqual([(x['period'],x['refreshed']) for x in result['periods']],[('day',True),('week',True),('month',False)])
+  return result,out
+ def month_provenance(self,site):
+  data=w.read_current(site);records=snapshot_records(read_snapshot(LocalSite(site),data['agent_snapshot_id'],'records'))['month']
+  return {rid:{k:r['provenance'][k] for k in PROVENANCE} for rid,r in records.items()}
+ def test_a_carried_window_keeps_its_records_provider_provenance(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   data=current()
+   for f in data['feeds']:f['rows'][0]['observation']={'provider':'gittrend','period':f['period'],'page':3,'fetched_at':'2026-10-28T11:47:43.814352+00:00','source_url':f"https://gittrend.io/api/trending?time={f['period']}&page=3&limit=100",'source_as_of':None}
+   old=old_format_site(tmp,data);compact=json.loads((old/'data.7f31053344a74c7f.json').read_text())
+   for f in compact['feeds']:
+    for r in f['rows']:r.pop('observation')  # like run 40710274815's data file: the provenance lives only in the snapshot
+   (old/'data.7f31053344a74c7f.json').write_text(json.dumps(compact))
+   result,out=self.carry_month(tmp,LocalSite(old))
+   self.assertEqual(self.month_provenance(out),{'gittrend:1':{'provider_page':3,'source_url':'https://gittrend.io/api/trending?time=month&page=3&limit=100','fetched_at':'2026-10-28T11:47:43.814352+00:00'}})
+   self.assertIn('published snapshot records (provider page, source URL, fetch time) restored on 3 previously published rows',result['notes'])
+ @unittest.skipUnless((OLD_ARTIFACT/'api/v1/catalog.json').is_file(),'run 40710274815 artifact not extracted (gh run download 40710274815 -n github-pages)')
+ def test_the_real_run_40710274815_month_keeps_2000_of_2000_records_provenance(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   result,out=self.carry_month(tmp,LocalSite(OLD_ARTIFACT))
+   before,after=self.month_provenance(OLD_ARTIFACT),self.month_provenance(out)
+   self.assertEqual(len(before),2000);self.assertEqual(sorted(after),sorted(before))
+   same=sum(json.dumps(after[k],sort_keys=True)==json.dumps(before[k],sort_keys=True) for k in before)
+   self.assertEqual(same,2000);self.assertEqual(sum(all(v is not None for v in after[k].values()) for k in after),2000)
+   print(f'\nrun 40710274815 month carried: {same}/2000 records keep provider_page, source_url, fetched_at byte-identical')
