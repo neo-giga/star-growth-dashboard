@@ -68,7 +68,7 @@ jobs:
     # Neo approved this narrow publication bundle; no personal token is required and nothing writes to the repository.
     permissions:
       contents: read
-      actions: read
+      actions: write  # read: the previous publication's artifact; write: dispatch a replacement refresh when sources change
       pages: write
       id-token: write
     environment:
@@ -116,11 +116,22 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
       - name: Refuse to deploy a stale run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ inputs.mode || (github.event_name == 'push' && 'validate-current') || 'refresh' }}
         run: |
           # Deploy only when live main's UI/scripts/workflow (the push trigger's paths, scripts/deploy_paths.py) match this run's:
           # a stale run must never roll Pages back to an older UI, and a newer tests/docs-only commit must not strand this one.
           git fetch --no-tags --depth=1 origin refs/heads/main
-          python3 scripts/deploy_paths.py HEAD FETCH_HEAD
+          if ! python3 scripts/deploy_paths.py HEAD FETCH_HEAD; then
+            if [ "$MODE" = refresh ]; then
+              # The queued push run only re-releases yesterday's data: queue a refresh on the new sources instead. It takes the
+              # concurrency group's single pending slot, superseding that push run (a refresh ships the new UI too).
+              gh workflow run weekly-refresh.yml --ref main -f mode=refresh
+              echo "sources changed on main; replacement refresh $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/workflows/weekly-refresh.yml dispatched" >&2
+            fi
+            exit 1
+          fi
       - name: Upload exact staged Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:

@@ -119,11 +119,12 @@ builds the whole site as the Pages artifact from the repository's UI sources plu
 run's staged data, and reads the previous publication from the `github-pages` artifact of
 the newest successful run (kept 30 days), never from the live site; with no readable
 artifact it fails and the current site stays (`bootstrap_from_live` reads the live site once).
-Its job permissions are contents:read, actions:read, pages:write and id-token:write for this public
+Its job permissions are contents:read, actions:write (read the previous publication, dispatch a replacement refresh), pages:write and id-token:write for this public
 repository only; it uses the job's GITHUB_TOKEN, no long-lived token.
 A push to `main` that changes the UI or source files re-publishes the last published data with the
 new UI (validate-current) automatically; a run deploys only while its UI/script sources
-still match live `main`'s. Actions → Daily public feed refresh → Run
+still match live `main`'s, and a refresh stopped that way dispatches a replacement refresh on
+the new sources. Re-runs are refused: dispatch a new run. Actions → Daily public feed refresh → Run
 workflow runs it on demand (validate-current re-publishes the last published data; refresh
 retrieves new feeds; `day_depth`, `week_depth`, `month_depth` are all or a multiple of 100,
 default all, all, 20000; `verify_top` the rows

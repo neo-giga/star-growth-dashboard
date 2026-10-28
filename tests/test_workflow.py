@@ -1,5 +1,5 @@
 """The installed workflow: no git writes, one artifact per run, a push to main of UI/source files re-publishes with validate-current."""
-import importlib.util,pathlib,re,subprocess,tempfile,unittest
+import importlib.util,os,pathlib,re,subprocess,tempfile,unittest
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 _spec=importlib.util.spec_from_file_location('deploy_paths',ROOT/'scripts/deploy_paths.py');_m=importlib.util.module_from_spec(_spec);_spec.loader.exec_module(_m);DEPLOY_PATHS=_m.DEPLOY_PATHS
 WORKFLOW=(ROOT/'.github/workflows/weekly-refresh.yml').read_text()
@@ -21,7 +21,7 @@ class WorkflowTests(unittest.TestCase):
   self.assertIn("    - cron: '23 7 * * *'",WORKFLOW)
  def test_previous_publication_is_the_retained_pages_artifact(self):
   job=WORKFLOW.split('  refresh-and-publish:',1)[1]
-  self.assertIn('      actions: read\n',job)  # list runs and download their github-pages artifact with the job token
+  self.assertIn('      actions: write  #',job)  # list runs and download their github-pages artifact; dispatch a replacement refresh
   self.assertRegex(job,r'uses: actions/upload-pages-artifact@v3\n        with:\n          path: \$\{\{ runner.temp \}\}/site\n(?:          #.*\n)?          retention-days: 30\n')
   self.assertIn("BOOTSTRAP: ${{ inputs.bootstrap_from_live && '--bootstrap-from-live' || '' }}",job);self.assertIn('$BOOTSTRAP',job)
   self.assertRegex(WORKFLOW,r'      bootstrap_from_live:\n        description: .*\n        type: boolean\n        default: false\n')
@@ -33,18 +33,44 @@ class WorkflowTests(unittest.TestCase):
  def test_deploy_guard_ignores_changes_outside_the_deploy_paths(self):
   # Codex full-lists review #4: a tests-only commit landing on main while a refresh runs triggers no new run, so the old exact
   # "live main == HEAD" guard threw the day's refresh away. The guard step runs here as written in the workflow.
-  step=re.search(r'      - name: Refuse to deploy a stale run\n        run: \|\n((?:          .*\n)+)',WORKFLOW)[1]
+  step=re.search(r'      - name: Refuse to deploy a stale run\n        env:\n(?:          .*\n)+        run: \|\n((?:          .*\n)+)',WORKFLOW)[1]
   with tempfile.TemporaryDirectory() as tmp:
    tmp=pathlib.Path(tmp);git=lambda *a,cwd=tmp/'work':subprocess.run(['git','-c','user.name=t','-c','user.email=t@t',*a],cwd=cwd,check=True,capture_output=True,text=True).stdout.strip()
    subprocess.run(['git','init','-q','--bare','-b','main',str(tmp/'origin.git')],check=True);(tmp/'work').mkdir();git('init','-q','-b','main')
    for name in ('app.js','tests/test_x.py','scripts/deploy_paths.py','.github/workflows/weekly-refresh.yml'):
     (tmp/'work'/name).parent.mkdir(parents=True,exist_ok=True);(tmp/'work'/name).write_bytes((ROOT/name).read_bytes() if (ROOT/name).exists() else b'x')
    git('add','-A');git('commit','-qm','run');run=git('rev-parse','HEAD');git('remote','add','origin',(tmp/'origin.git').as_uri())
-   guard=lambda:subprocess.run(['bash','-e','-c',step],cwd=tmp/'work',capture_output=True,text=True)
+   (tmp/'bin').mkdir();(tmp/'bin'/'gh').write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$GH_LOG"\n');(tmp/'bin'/'gh').chmod(0o755)  # a stub gh: records its arguments
+   env=lambda mode:dict(os.environ,PATH=f"{tmp/'bin'}:{os.environ['PATH']}",GH_LOG=str(tmp/'gh.log'),MODE=mode,GITHUB_SERVER_URL='https://github.com',GITHUB_REPOSITORY='o/r')
+   guard=lambda mode='refresh':subprocess.run(['bash','-e','-c',step],cwd=tmp/'work',capture_output=True,text=True,env=env(mode))
+   gh_calls=lambda:(tmp/'gh.log').read_text().splitlines() if (tmp/'gh.log').exists() else []
    def land(name,text):
     git('checkout','-q','main');(tmp/'work'/name).write_text(text);git('commit','-qam',name);git('push','-q','origin','main');git('checkout','-q','--detach',run)
    land('tests/test_x.py','y');proc=guard();self.assertEqual(proc.returncode,0,proc.stderr);self.assertIn('deploy-relevant sources match live main',proc.stdout)
-   land('app.js','changed');proc=guard();self.assertEqual(proc.returncode,1);self.assertIn('newer UI/scripts on main',proc.stderr);self.assertIn('a new run is queued',proc.stderr)
+   self.assertEqual(gh_calls(),[])
+   land('app.js','changed');proc=guard('validate-current');self.assertEqual(proc.returncode,1);self.assertIn('newer UI/scripts on main',proc.stderr);self.assertEqual(gh_calls(),[])
+ def test_a_refresh_superseded_by_a_source_change_dispatches_a_replacement_refresh(self):
+  # Codex full-lists review 2 #3: the queued push run only re-releases, so a refresh stopped by the guard lost its fresh collection.
+  step=re.search(r'      - name: Refuse to deploy a stale run\n        env:\n((?:          .*\n)+)        run: \|\n((?:          .*\n)+)',WORKFLOW)
+  self.assertIn("GH_TOKEN: ${{ github.token }}",step[1]);self.assertIn("MODE: ${{ inputs.mode || (github.event_name == 'push' && 'validate-current') || 'refresh' }}",step[1])
+  with tempfile.TemporaryDirectory() as tmp:
+   tmp=pathlib.Path(tmp);git=lambda *a,cwd=tmp/'work':subprocess.run(['git','-c','user.name=t','-c','user.email=t@t',*a],cwd=cwd,check=True,capture_output=True,text=True).stdout.strip()
+   subprocess.run(['git','init','-q','--bare','-b','main',str(tmp/'origin.git')],check=True);(tmp/'work').mkdir();git('init','-q','-b','main')
+   for name in ('app.js','scripts/deploy_paths.py','.github/workflows/weekly-refresh.yml'):
+    (tmp/'work'/name).parent.mkdir(parents=True,exist_ok=True);(tmp/'work'/name).write_bytes((ROOT/name).read_bytes())
+   git('add','-A');git('commit','-qm','run');run=git('rev-parse','HEAD');git('remote','add','origin',(tmp/'origin.git').as_uri())
+   (tmp/'work'/'app.js').write_text('changed');git('commit','-qam','ui');git('push','-q','origin','main');git('checkout','-q','--detach',run)
+   (tmp/'bin').mkdir();(tmp/'bin'/'gh').write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$GH_LOG"\n');(tmp/'bin'/'gh').chmod(0o755)
+   proc=subprocess.run(['bash','-e','-c',step[2]],cwd=tmp/'work',capture_output=True,text=True,
+                       env=dict(os.environ,PATH=f"{tmp/'bin'}:{os.environ['PATH']}",GH_LOG=str(tmp/'gh.log'),MODE='refresh',GITHUB_SERVER_URL='https://github.com',GITHUB_REPOSITORY='o/r'))
+   self.assertEqual(proc.returncode,1);self.assertEqual((tmp/'gh.log').read_text().splitlines(),['workflow run weekly-refresh.yml --ref main -f mode=refresh'])
+   self.assertIn('sources changed on main; replacement refresh https://github.com/o/r/actions/workflows/weekly-refresh.yml dispatched',proc.stderr)
+  # Nothing is uploaded or deployed after the guard fails: both steps follow it and run only on success (no `if:`).
+  job=WORKFLOW.split('    steps:\n',1)[1];names=re.findall(r'      - name: (.*)\n',job)
+  guard,upload,deploy=(names.index(n) for n in ('Refuse to deploy a stale run','Upload exact staged Pages artifact','Deploy exact artifact'))
+  self.assertLess(guard,upload);self.assertLess(upload,deploy)
+  for name in ('Upload exact staged Pages artifact','Deploy exact artifact'):
+   self.assertNotIn('        if:',job.split(f'      - name: {name}\n',1)[1].split('      - name:',1)[0])
  def test_a_re_run_is_refused_before_anything_else(self):
   job=WORKFLOW.split('    steps:\n',1)[1]
   self.assertTrue(job.startswith('      - name: Refuse a re-run\n'))
