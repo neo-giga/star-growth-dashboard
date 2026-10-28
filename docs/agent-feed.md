@@ -49,14 +49,16 @@ necessarily unique humans. Capped/incomplete counts stay unknown.
 `pr_review_comment_count` means inline PR review comments. Neither is a commit
 count, issue count, PR count or number of reviews. A future bounded enrichment
 would need explicit endpoints, pagination, timestamps and rate budgets; no
-33,000-repository scrape is performed by this feed or its weekly refresh.
+33,000-repository scrape is performed by this feed or its daily refresh.
 
 ## Coverage and rights
 
-Current weekly traversal reached 330 pages / 32,907 distinct provider IDs but the
-reported total changed from 32,847 to 32,907: **inconsistent**, not an atomic
-snapshot. Day/month are **300-row partial samples**. Richer metadata does not
-improve those limits. Missing from this feed does not mean deleted from GitHub.
+Each period holds GitTrend's **top 2,000 rows by provider rank** (20 pages of 100,
+`coverage.bounded_top`), read daily. The provider total moves between pages and is
+kept in `coverage.warnings`, so `coverage.status` is `partial` or `inconsistent` by
+design: a bounded sample, not an atomic snapshot. Repositories outside the top 2,000
+of a window are not listed. Richer metadata does not improve those limits. Missing
+from this feed does not mean deleted from GitHub.
 
 [GitTrend methodology](https://gittrend.io/methodology) advertises rankings and
 aggregate data as CC0. Repository metadata retains its respective owners' rights;
@@ -65,9 +67,12 @@ No gitpulse dataset is redistributed.
 
 ## Refresh behavior
 
-The prepared weekly pipeline validates pagination, duplicates, counts and
-provenance before publication. A partial/inconsistent refresh must leave the
-previous public catalog unchanged. Metadata is not bulk-refetched: unchanged
+The daily pipeline validates pagination, duplicates, counts and provenance
+before publication: every requested page full except a genuine last page, no
+duplicate provider IDs, min(top, provider total) rows, and no period shrinking
+below half of min(top, previous rows). A failing period is re-read once after
+330 s; a second failure leaves the previous public catalog unchanged. A `top=0`
+run applies the strict whole-feed rule instead. Metadata is not bulk-refetched: unchanged
 provider-ID/name matches may retain cached metadata with its original observed
  time. A validation/redeployment run is not a new data retrieval. Consult the
 published workflow and its successful run before assuming automatic refresh is
@@ -75,13 +80,15 @@ active; this document alone is not proof that a schedule has run.
 
 ## Installation status
 
-The weekly workflow is installed at `.github/workflows/weekly-refresh.yml` (a copy of
-[the template](weekly-refresh.yml)) and runs Mondays 07:23 UTC; Pages source is GitHub Actions.
+The daily workflow is installed at `.github/workflows/weekly-refresh.yml` (a copy of
+[the template](weekly-refresh.yml); the file name is kept for its run history) and runs
+daily at 07:23 UTC; Pages source is GitHub Actions.
 Its job permissions are contents:write, pages:write and id-token:write for this public
 repository only; it uses the job's GITHUB_TOKEN, no long-lived token.
-Actions → Weekly public feed refresh → Run workflow runs it on demand (validate-current
-re-publishes the current data; refresh retrieves new feeds).
-The schedule is Monday 07:23 UTC only after installation. If any pagination or
+Actions → Daily public feed refresh → Run workflow runs it on demand (validate-current
+re-publishes the current data; refresh retrieves new feeds; `top` sets rows per period,
+default 2000, 0 for the strict whole feed).
+The schedule is daily 07:23 UTC. If any pagination or
 count check fails, do not publish the partial refresh or advance the catalog.
 
 Official setup references: [Pages publishing source](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site),
