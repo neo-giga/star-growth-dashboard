@@ -1,4 +1,4 @@
-import copy,importlib.util,json,pathlib,tempfile,unittest
+import copy,importlib.util,json,pathlib,subprocess,sys,tempfile,unittest,urllib.parse
 from unittest.mock import patch
 from trending.feeds import FeedClient
 ROOT=pathlib.Path(__file__).resolve().parents[1]
@@ -47,12 +47,12 @@ class WeeklyRefreshTests(unittest.TestCase):
    with tempfile.TemporaryDirectory() as tmp:
     site=self.fixture(tmp);out=pathlib.Path(tmp)/'output';before=(site/'data.json').read_bytes()
     with patch.object(w,'collect_feed',return_value={'coverage':{'status':status}}):
-     with self.assertRaises(ValueError):w.stage_site(site,out,'refresh',export_builder=self.builder)
+     with self.assertRaises(ValueError):w.stage_site(site,out,'refresh',export_builder=self.builder,top=0)
     self.assertFalse(out.exists());self.assertEqual((site/'data.json').read_bytes(),before)
  def test_count_mismatch_failclosed(self):
   bad={'coverage':{'status':'complete','reached_end':True,'unique_repos':1,'reported_total':2,'last_reported_total':2,'duplicates':0}}
   with patch.object(w,'collect_feed',return_value=bad):
-   with self.assertRaises(ValueError):w.refresh_dashboard(current())
+   with self.assertRaises(ValueError):w.refresh_dashboard(current(),top=0)
  def test_builder_error_no_partial_output(self):
   with tempfile.TemporaryDirectory() as tmp:
    site=self.fixture(tmp);out=pathlib.Path(tmp)/'output'
@@ -78,3 +78,79 @@ class WeeklyRefreshTests(unittest.TestCase):
    from trending.agent_feed import hydrate_ui_index
    full=hydrate_ui_index(seconddata,second)
    self.assertEqual(full['feeds'][0]['rows'][0]['metadata']['observed_at'],'2025-12-01T00:00:00Z')
+
+
+def prior(n):
+ """Published data with n rows per period; ids and names line up with Provider so creation dates can carry."""
+ rows=[{'repo_id':1000+i,'full_name':f'owner{i}/repo{i}','stars':5,'gain':1,'language':'Python','created_at':'2020-01-01T00:00:00Z','created_at_github_repo_id':None,'metadata':None} for i in range(n)]
+ return {'generated_at':'2026-01-01T00:00:00Z','feeds':[{'provider':'gittrend','period':p,'source_as_of':None,'fetched_at_start':'2026-01-01T00:00:00Z','fetched_at_end':'2026-01-01T00:00:00Z','coverage':{'status':'partial'},'rows':copy.deepcopy(rows)} for p in ('day','week','month')]}
+def site_fixture(tmp,data):
+ site=pathlib.Path(tmp)/'current';site.mkdir();(site/'index.html').write_text('<link href="style.css"><script src="app.js"></script>');(site/'app.js').write_text("fetch('data.json')");(site/'style.css').write_text('body{}');(site/'data.json').write_text(json.dumps(data));return site
+class Provider:
+ """GitTrend /api/trending pages in the shape of the 2026-10-28 run checkpoints (100 rows, pagination with total/totalPages/hasMore).
+
+ drift=(page,total) changes the reported total from that page on; duplicate_page repeats page 1's first id; short_page drops one row.
+ Faults apply to the first fault_attempts reads of a period (attempts are counted by page-1 requests)."""
+ def __init__(self,total,drift=None,duplicate_page=None,short_page=None,fault_attempts=99):
+  self.total=total;self.drift=drift;self.duplicate_page=duplicate_page;self.short_page=short_page;self.fault_attempts=fault_attempts;self.pages=[]
+ def __call__(self,url):
+  q=dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query));page,limit=int(q['page']),int(q['limit']);self.pages.append((q['time'],page))
+  attempt=sum(1 for t,n in self.pages if t==q['time'] and n==1)
+  total=self.drift[1] if self.drift and page>=self.drift[0] else self.total
+  rows=[{'id':1000+i,'fullName':f'owner{i}/repo{i}','stars':10**6-i,'starsToday':str(10**5-i),'language':'Python','createdAt':'2025-12-16T11:05:49.000Z','forks':1,'topics':[],'trendingScore':1.5} for i in range((page-1)*limit,min(page*limit,total))]
+  if attempt<=self.fault_attempts:
+   if page==self.duplicate_page and rows:rows[0]=dict(rows[0],id=1000)
+   if page==self.short_page:rows=rows[:-1]
+  count=-(-total//limit)
+  return {'data':rows,'pagination':{'page':page,'limit':limit,'total':total,'totalPages':count,'hasMore':page<count}}
+ def factory(self,**kwargs):return FeedClient(fetch=self,**kwargs)
+class BoundedRefreshTests(unittest.TestCase):
+ def test_bounded_success_reads_only_the_top_pages(self):
+  p=Provider(12195);sleeps=[];data=w.refresh_dashboard(prior(300),client_factory=p.factory,sleeper=sleeps.append)
+  for f in data['feeds']:
+   self.assertEqual(len(f['rows']),2000);self.assertEqual(f['coverage']['bounded_top'],2000);self.assertEqual(f['coverage']['pages_fetched'],20);self.assertFalse(f['coverage']['reached_end']);self.assertEqual(f['coverage']['duplicates'],0)
+  self.assertEqual(len(p.pages),60);self.assertEqual(max(n for _,n in p.pages),20);self.assertEqual(sleeps,[])
+  day=data['feeds'][0];self.assertEqual(day['rows'][0]['created_at'],'2020-01-01T00:00:00Z');self.assertIsNone(day['rows'][1999]['created_at']);self.assertEqual(day['rows'][1999]['observation']['page'],20)
+  self.assertEqual(len(w.refresh_dashboard(prior(300),client_factory=Provider(12195).factory,top=300,sleeper=sleeps.append)['feeds'][0]['rows']),300)
+ def test_total_drift_is_tolerated_in_bounded_mode_but_not_strict(self):
+  p=Provider(66453,drift=(19,66574));sleeps=[];data=w.refresh_dashboard(prior(300),client_factory=p.factory,sleeper=sleeps.append)
+  f=data['feeds'][0];self.assertEqual(len(f['rows']),2000);self.assertEqual((f['coverage']['reported_total'],f['coverage']['last_reported_total']),(66453,66574))
+  self.assertIn('provider total changed from 66453 to 66574 at page 19',f['coverage']['warnings']);self.assertEqual(sleeps,[])
+  strict=Provider(250,drift=(2,260))
+  with self.assertRaisesRegex(ValueError,'day refresh not publishable: inconsistent; current site unchanged'):w.refresh_dashboard(prior(250),client_factory=strict.factory,top=0,sleeper=sleeps.append)
+  self.assertEqual(strict.pages,[('day',1),('day',2),('day',3)]);self.assertEqual(sleeps,[])
+ def test_duplicate_ids_retry_once_then_fail_closed(self):
+  p=Provider(12195,duplicate_page=2);sleeps=[]
+  with tempfile.TemporaryDirectory() as tmp:
+   site=site_fixture(tmp,prior(300));out=pathlib.Path(tmp)/'output';cp=pathlib.Path(tmp)/'cp';before=(site/'data.json').read_bytes()
+   with patch.object(w.time,'sleep',sleeps.append):
+    with self.assertRaisesRegex(ValueError,'day refresh not publishable: 1 duplicate provider IDs; current site unchanged'):
+     w.stage_site(site,out,'refresh',client_factory=p.factory,checkpoint_dir=cp,created_dates=lambda data:self.fail('network'))
+   self.assertEqual(sleeps,[330]);self.assertEqual(p.pages,[('day',n) for n in range(1,21)]*2)
+   self.assertFalse(out.exists());self.assertEqual((site/'data.json').read_bytes(),before)
+   self.assertTrue((cp/'day'/'day-100-000020.json').exists());self.assertTrue((cp/'day-retry'/'day-100-000020.json').exists())
+ def test_transient_fault_recovers_on_the_single_retry(self):
+  p=Provider(12195,duplicate_page=2,fault_attempts=1);sleeps=[];data=w.refresh_dashboard(prior(300),client_factory=p.factory,sleeper=sleeps.append)
+  self.assertEqual(sleeps,[330]*3);self.assertEqual(len(p.pages),120);self.assertEqual([len(f['rows']) for f in data['feeds']],[2000]*3)
+ def test_short_non_last_page_fails_closed(self):
+  p=Provider(12195,short_page=5);sleeps=[]
+  with self.assertRaisesRegex(ValueError,'page 5 returned 99, expected 100'):w.refresh_dashboard(prior(300),client_factory=p.factory,sleeper=sleeps.append)
+  self.assertEqual(sleeps,[330])
+ def test_shrink_guard_refuses_a_collapsed_feed(self):
+  sleeps=[]
+  with self.assertRaisesRegex(ValueError,'day refresh not publishable: 10 rows is under half of min\\(top, previous 300\\)'):w.refresh_dashboard(prior(300),client_factory=Provider(10).factory,sleeper=sleeps.append)
+  self.assertEqual(sleeps,[])
+  self.assertEqual(len(w.refresh_dashboard(prior(300),client_factory=Provider(150).factory,sleeper=sleeps.append)['feeds'][0]['rows']),150)
+  with self.assertRaisesRegex(ValueError,'999 rows is under half of min\\(top, previous 2000\\)'):w.refresh_dashboard(prior(2000),client_factory=Provider(999).factory,sleeper=sleeps.append)
+ def test_provider_with_fewer_rows_than_top_reaches_its_end(self):
+  p=Provider(1250);data=w.refresh_dashboard(prior(1000),client_factory=p.factory,sleeper=self.fail)
+  f=data['feeds'][0];self.assertEqual(len(f['rows']),1250);self.assertTrue(f['coverage']['reached_end']);self.assertEqual(f['coverage']['pages_fetched'],13);self.assertEqual(max(n for _,n in p.pages),13)
+ def test_top_validation(self):
+  network=lambda **kw:self.fail('network')
+  for top in (150,50,10100,-100,'2000',2000.0,None,True):
+   with self.assertRaisesRegex(ValueError,'top'):w.refresh_dashboard(prior(1),client_factory=network,top=top)
+  with self.assertRaisesRegex(ValueError,'max_pages'):w.refresh_dashboard(prior(1),client_factory=network,top=2000,max_pages=19)
+  with tempfile.TemporaryDirectory() as tmp:
+   site=site_fixture(tmp,prior(1));out=pathlib.Path(tmp)/'output'
+   proc=subprocess.run([sys.executable,str(ROOT/'scripts/weekly_refresh.py'),'--site-dir',str(site),'--output-dir',str(out),'--top','150'],capture_output=True,text=True)
+   self.assertEqual(proc.returncode,2);result=json.loads(proc.stdout);self.assertIn('top',result['error']);self.assertTrue(result['current_site_preserved']);self.assertFalse(out.exists())

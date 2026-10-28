@@ -1,6 +1,8 @@
 """Stage a complete refresh without mutating the currently published site.
 
 validate-current exercises export/deployment plumbing, not new data collection.
+Refresh mode reads the provider's top N rows per period (--top, default 2000); --top 0 is
+the strict whole-feed rule.
 Public cached GitHub metadata is carried only for same period/provider ID/name.
 """
 from __future__ import annotations
@@ -9,6 +11,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from trending.feeds import FeedClient, collect_feed
 from fill_created_dates import fill_created_dates
+RETRY_DELAY = 330  # seconds: outlasts GitTrend's 300 s edge cache before a failed period is re-read from page 1
 
 
 def local_asset(root, name):
@@ -59,30 +62,68 @@ def validate_dashboard(data):
         raise ValueError('all three separate periods required')
 
 
-def refresh_dashboard(current, client_factory=FeedClient, max_pages=1000, checkpoint_dir=None):
+def bounded_problem(result, top):
+    """Why a top-N collection is not publishable, or None: every page full except a genuine last page, no duplicate IDs,
+    min(top, provider total) rows. A provider total that moves between pages stays in coverage warnings but is allowed."""
+    coverage, pages, limit = result['coverage'], result['pages'], result['coverage']['limit']
+    if coverage['failure']:
+        return coverage['failure']
+    if coverage['duplicates']:
+        return f'{coverage["duplicates"]} duplicate provider IDs'
+    for index, page in enumerate(pages):
+        expected = page['total'] - (page['page'] - 1) * limit if coverage['reached_end'] and index == len(pages) - 1 else limit
+        if page['returned'] != expected:
+            return f'page {page["page"]} returned {page["returned"]}, expected {expected}'
+    expected = min(top, coverage['last_reported_total']) if coverage['reached_end'] else top
+    if len(result['rows']) != expected:
+        return f'{len(result["rows"])} rows, expected {expected}'
+    return None
+
+
+def refresh_dashboard(current, client_factory=FeedClient, max_pages=1000, checkpoint_dir=None, top=2000, sleeper=None):
     validate_dashboard(current)
     if type(max_pages) is not int or not 1 <= max_pages <= 1000:
         raise ValueError('max_pages must be 1..1000')
+    if type(top) is not int or (top and not (100 <= top <= 10000 and top % 100 == 0)):
+        raise ValueError('top must be 0 (whole feed, strict) or a multiple of 100 in 100..10000')
+    if top > max_pages * 100:
+        raise ValueError('max_pages bound is below the pages top needs')
     results = []
     for period in ('day','week','month'):
-        cache = pathlib.Path(checkpoint_dir) / period if checkpoint_dir else None
-        client = client_factory(cache_dir=cache, resume=False)
-        if client_factory is FeedClient:
-            fetch = client.fetch
-            last = [None]
-            def paced_fetch(url):
-                if last[0] is not None:
-                    time.sleep(max(0.0, 1.0 - (time.monotonic() - last[0])))
-                last[0] = time.monotonic()
-                return fetch(url)
-            client.fetch = paced_fetch
-        result = collect_feed(client, period, max_pages=max_pages)
-        coverage = result['coverage']
-        if (coverage['status'] != 'complete' or not coverage['reached_end'] or
-                coverage['unique_repos'] != coverage['reported_total'] or
-                coverage['last_reported_total'] != coverage['reported_total'] or coverage['duplicates']):
-            raise ValueError(f'{period} refresh not publishable: {coverage["status"]}; current site unchanged')
+        for attempt in (1, 2):
+            cache = pathlib.Path(checkpoint_dir) / (period if attempt == 1 else f'{period}-retry') if checkpoint_dir else None
+            client = client_factory(cache_dir=cache, resume=False)
+            if client_factory is FeedClient:
+                fetch = client.fetch
+                last = [None]
+                def paced_fetch(url):
+                    if last[0] is not None:
+                        time.sleep(max(0.0, 1.0 - (time.monotonic() - last[0])))
+                    last[0] = time.monotonic()
+                    return fetch(url)
+                client.fetch = paced_fetch
+            result = collect_feed(client, period, max_pages=top // 100 if top else max_pages)
+            coverage = result['coverage']
+            if top:
+                problem = bounded_problem(result, top)
+            elif (coverage['status'] != 'complete' or not coverage['reached_end'] or
+                    coverage['unique_repos'] != coverage['reported_total'] or
+                    coverage['last_reported_total'] != coverage['reported_total'] or coverage['duplicates']):
+                problem = coverage['status']
+            else:
+                problem = None
+            if problem is None:
+                break
+            if top and attempt == 1:
+                (sleeper or time.sleep)(RETRY_DELAY)
+                continue
+            raise ValueError(f'{period} refresh not publishable: {problem}; current site unchanged')
         prior_feed = next(f for f in current['feeds'] if f['period'] == period)
+        if top:
+            # Shrink guard: a valid-looking feed that lost over half of min(top, previous rows) is a broken provider response.
+            if len(result['rows']) < min(top, len(prior_feed['rows'])) / 2:
+                raise ValueError(f'{period} refresh not publishable: {len(result["rows"])} rows is under half of min(top, previous {len(prior_feed["rows"])}); current site unchanged')
+            coverage['bounded_top'] = top
         prior = {(r['repo_id'],r['full_name'].casefold()):r for r in prior_feed['rows']}
         rows = []
         for row in result['rows']:
@@ -127,7 +168,7 @@ def copy_public_site(site, stage):
 
 
 def stage_site(site_dir, output_dir, mode='refresh', max_pages=1000, checkpoint_dir=None,
-               client_factory=FeedClient, export_builder=None, created_dates=fill_created_dates):
+               client_factory=FeedClient, export_builder=None, created_dates=fill_created_dates, top=2000):
     site, output = pathlib.Path(site_dir).resolve(), pathlib.Path(output_dir).resolve()
     if output.exists() or output == site or site in output.parents:
         raise ValueError('output must be a new directory outside current site')
@@ -136,7 +177,7 @@ def stage_site(site_dir, output_dir, mode='refresh', max_pages=1000, checkpoint_
     current, ui = read_current(site)
     from trending.agent_feed import hydrate_ui_index, build_ui_index
     current = hydrate_ui_index(current, site)
-    data = refresh_dashboard(current,client_factory,max_pages,checkpoint_dir) if mode == 'refresh' else copy.deepcopy(current)
+    data = refresh_dashboard(current,client_factory,max_pages,checkpoint_dir,top) if mode == 'refresh' else copy.deepcopy(current)
     # New rows arrive without a GitHub creation date; ask GitHub (via gh) before publishing. Failures leave UNKNOWN.
     created = created_dates(data) if mode == 'refresh' else None
     output.parent.mkdir(parents=True,exist_ok=True)
@@ -153,7 +194,7 @@ def stage_site(site_dir, output_dir, mode='refresh', max_pages=1000, checkpoint_
         subprocess.run([sys.executable,str(pathlib.Path(__file__).with_name('build_static_release.py')),
                         '--source',str(source),'--output',str(stage)],check=True,capture_output=True,text=True)
         os.replace(stage,output)
-    return {'mode':mode,'new_retrieval':mode=='refresh','output':str(output),'created_dates':created,
+    return {'mode':mode,'new_retrieval':mode=='refresh','top':top if mode == 'refresh' else None,'output':str(output),'created_dates':created,
             'periods':[{ 'period':f['period'],'rows':len(f['rows']),'status':f['coverage']['status'],
                         'fetched_at_end':f['fetched_at_end']} for f in data['feeds']]}
 
@@ -161,9 +202,10 @@ def stage_site(site_dir, output_dir, mode='refresh', max_pages=1000, checkpoint_
 def main():
     p=argparse.ArgumentParser();p.add_argument('--site-dir',required=True);p.add_argument('--output-dir',required=True)
     p.add_argument('--mode',choices=('refresh','validate-current'),default='refresh');p.add_argument('--max-pages',type=int,default=1000)
+    p.add_argument('--top',type=int,default=2000,help='rows per period (multiple of 100, 100..10000); 0 reads the whole feed under the strict rule')
     p.add_argument('--checkpoint-dir');p.add_argument('--diagnostic');a=p.parse_args()
     try:
-        result=stage_site(a.site_dir,a.output_dir,a.mode,a.max_pages,a.checkpoint_dir);code=0
+        result=stage_site(a.site_dir,a.output_dir,a.mode,a.max_pages,a.checkpoint_dir,top=a.top);code=0
     except Exception as exc:
         result={'mode':a.mode,'status':'failed','error':f'{type(exc).__name__}: {str(exc)[:500]}','current_site_preserved':True};code=2
     if a.diagnostic:
