@@ -1,4 +1,4 @@
-import copy,importlib.util,json,pathlib,subprocess,sys,tempfile,unittest,urllib.parse
+import copy,importlib.util,json,pathlib,subprocess,sys,tempfile,unittest,urllib.error,urllib.parse
 from unittest.mock import patch
 from trending.feeds import FeedClient
 ROOT=pathlib.Path(__file__).resolve().parents[1]
@@ -93,14 +93,18 @@ class Provider:
  Faults apply to the first fault_attempts reads of a period (attempts are counted by page-1 requests). Stars rise by one per
  attempt so a test can tell which pass was published. drop_after=(period,page) removes the rank-1 repository from the ranking
  once that page has been served, shifting every later page up by one rank; shift_every_pass shifts by one more rank per attempt."""
- def __init__(self,total,drift=None,duplicate_page=None,short_page=None,fault_attempts=99,drop_after=None,shift_every_pass=False):
+ def __init__(self,total,drift=None,duplicate_page=None,short_page=None,fault_attempts=99,drop_after=None,shift_every_pass=False,fail_page=None,totals=None,short_pages=None):
   self.total=total;self.drift=drift;self.duplicate_page=duplicate_page;self.short_page=short_page;self.fault_attempts=fault_attempts;self.drop_after=drop_after;self.shift_every_pass=shift_every_pass;self.dropped=False;self.pages=[]
+  self.fail_page=fail_page;self.totals=totals or {};self.short_pages=short_pages  # totals: per-period provider total; short_pages=(first page, rows): every page from there on loses that many rows
  def __call__(self,url):
   q=dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query));page,limit=int(q['page']),int(q['limit']);self.pages.append((q['time'],page))
+  if page==self.fail_page:raise urllib.error.URLError('synthetic connection reset')
   attempt=sum(1 for t,n in self.pages if t==q['time'] and n==1)
-  total=self.drift[1] if self.drift and page>=self.drift[0] else self.total
+  base=self.totals.get(q['time'],self.total)
+  total=self.drift[1] if self.drift and page>=self.drift[0] else base
   offset=(1 if self.dropped else 0)+(attempt-1 if self.shift_every_pass else 0)
   rows=[{'id':1000+i,'fullName':f'owner{i}/repo{i}','stars':10**6-i+attempt,'starsToday':str(10**5-i),'language':'Python','createdAt':'2025-12-16T11:05:49.000Z','forks':1,'topics':[],'trendingScore':1.5} for i in range((page-1)*limit+offset,min(page*limit,total)+offset)]
+  if self.short_pages and page>=self.short_pages[0]:rows=rows[:len(rows)-self.short_pages[1]]
   if attempt<=self.fault_attempts:
    if page==self.duplicate_page and rows:rows[0]=dict(rows[0],id=1000)
    if page==self.short_page:rows=rows[:-1]
@@ -120,7 +124,7 @@ class ReplayingCache:
  def factory(self,**kwargs):return FeedClient(fetch=self,**kwargs)
 class BoundedRefreshTests(unittest.TestCase):
  def test_bounded_success_reads_the_top_pages_twice_and_publishes_the_later_pass(self):
-  p=Provider(12195);sleeps=[];data=w.refresh_dashboard(prior(300),client_factory=p.factory,sleeper=sleeps.append)
+  p=Provider(12195);sleeps=[];data=w.refresh_dashboard(prior(300),client_factory=p.factory,top=2000,sleeper=sleeps.append)
   for f in data['feeds']:
    self.assertEqual(len(f['rows']),2000);self.assertEqual(f['coverage']['bounded_top'],2000);self.assertEqual(f['coverage']['verified_passes'],['A','B']);self.assertEqual(f['coverage']['pages_fetched'],20);self.assertFalse(f['coverage']['reached_end']);self.assertEqual(f['coverage']['duplicates'],0)
    self.assertEqual(f['rows'][0]['stars'],10**6+2)  # pass B's rows, not pass A's
@@ -130,7 +134,7 @@ class BoundedRefreshTests(unittest.TestCase):
  def test_rank_shift_between_pages_is_caught_by_the_second_pass(self):
   # Codex review round 1: after page 1 the rank-1 repository drops out, so pages 2..20 return old ranks 102..2001: every page
   # full, 2000 unique ids, yet old rank 101 (id 1100) is missing and the list was never the provider's top 2,000.
-  p=Provider(12195,drop_after=('day',1));sleeps=[];data=w.refresh_dashboard(prior(300),client_factory=p.factory,sleeper=sleeps.append)
+  p=Provider(12195,drop_after=('day',1));sleeps=[];data=w.refresh_dashboard(prior(300),client_factory=p.factory,top=2000,sleeper=sleeps.append)
   day=data['feeds'][0];ids=[r['repo_id'] for r in day['rows']]
   self.assertIn(1100,ids);self.assertNotIn(1000,ids);self.assertEqual(ids,list(range(1001,3001)))
   self.assertEqual(day['coverage']['verified_passes'],['B','C']);self.assertEqual([f['coverage']['verified_passes'] for f in data['feeds'][1:]],[['A','B']]*2)
@@ -140,7 +144,7 @@ class BoundedRefreshTests(unittest.TestCase):
   # before the rank-1 drop, pages 2..20 after) for up to 900 s. Pass B must start past that window so it reads fresh, coherent pages.
   cache=ReplayingCache(Provider(12195,drop_after=('day',1)));sleeps=[]
   def sleeper(seconds):sleeps.append(seconds);cache.sleep(seconds)
-  data=w.refresh_dashboard(prior(300),client_factory=cache.factory,sleeper=sleeper)
+  data=w.refresh_dashboard(prior(300),client_factory=cache.factory,top=2000,sleeper=sleeper)
   day=data['feeds'][0];ids=[r['repo_id'] for r in day['rows']]
   self.assertIn(1100,ids);self.assertEqual(ids,list(range(1001,3001)))
   self.assertEqual(day['coverage']['verified_passes'],['B','C']);self.assertEqual(sleeps,[910,910]);self.assertEqual(cache.replayed,0);self.assertEqual(w.RETRY_DELAY,300+600+10)
@@ -150,11 +154,11 @@ class BoundedRefreshTests(unittest.TestCase):
    site=site_fixture(tmp,prior(300));out=pathlib.Path(tmp)/'output';cp=pathlib.Path(tmp)/'cp';before=(site/'data.json').read_bytes()
    with patch.object(w.time,'sleep',sleeps.append):
     with self.assertRaisesRegex(ValueError,'day refresh not publishable: membership or order changed between passes; current site unchanged'):
-     w.stage_site(site,out,'refresh',client_factory=p.factory,checkpoint_dir=cp,created_dates=lambda data:self.fail('network'))
+     w.stage_site(site,out,'refresh',client_factory=p.factory,checkpoint_dir=cp,created_dates=lambda data:self.fail('network'),top=2000)
    self.assertEqual(sleeps,[910,910]);self.assertEqual(len(p.pages),180);self.assertFalse(out.exists());self.assertEqual((site/'data.json').read_bytes(),before)
    self.assertEqual(sorted(d.name for d in cp.iterdir()),['day','day-retry','day-verify','month','month-retry','month-verify','week','week-retry','week-verify'])
  def test_total_drift_is_tolerated_in_bounded_mode_but_not_strict(self):
-  p=Provider(66453,drift=(19,66574));sleeps=[];data=w.refresh_dashboard(prior(300),client_factory=p.factory,sleeper=sleeps.append)
+  p=Provider(66453,drift=(19,66574));sleeps=[];data=w.refresh_dashboard(prior(300),client_factory=p.factory,top=2000,sleeper=sleeps.append)
   f=data['feeds'][0];self.assertEqual(len(f['rows']),2000);self.assertEqual((f['coverage']['reported_total'],f['coverage']['last_reported_total']),(66453,66574))
   self.assertIn('provider total changed from 66453 to 66574 at page 19',f['coverage']['warnings']);self.assertEqual(sleeps,[910])
   strict=Provider(250,drift=(2,260));strict_sleeps=[]
@@ -166,33 +170,118 @@ class BoundedRefreshTests(unittest.TestCase):
    site=site_fixture(tmp,prior(300));out=pathlib.Path(tmp)/'output';cp=pathlib.Path(tmp)/'cp';before=(site/'data.json').read_bytes()
    with patch.object(w.time,'sleep',sleeps.append):
     with self.assertRaisesRegex(ValueError,'day refresh not publishable: earlier pass: 1 duplicate provider IDs; current site unchanged'):
-     w.stage_site(site,out,'refresh',client_factory=p.factory,checkpoint_dir=cp,created_dates=lambda data:self.fail('network'))
+     w.stage_site(site,out,'refresh',client_factory=p.factory,checkpoint_dir=cp,created_dates=lambda data:self.fail('network'),top=2000)
    self.assertEqual(sleeps,[910,910]);self.assertEqual(len(p.pages),180);self.assertEqual(max(n for _,n in p.pages),20)
    self.assertFalse(out.exists());self.assertEqual((site/'data.json').read_bytes(),before)
    for d in ('day','day-verify','day-retry'):self.assertTrue((cp/d/'day-100-000020.json').exists())
  def test_transient_fault_recovers_on_the_single_retry(self):
-  p=Provider(12195,duplicate_page=2,fault_attempts=1);sleeps=[];data=w.refresh_dashboard(prior(300),client_factory=p.factory,sleeper=sleeps.append)
+  p=Provider(12195,duplicate_page=2,fault_attempts=1);sleeps=[];data=w.refresh_dashboard(prior(300),client_factory=p.factory,top=2000,sleeper=sleeps.append)
   self.assertEqual(sleeps,[910,910]);self.assertEqual(len(p.pages),180);self.assertEqual([len(f['rows']) for f in data['feeds']],[2000]*3)
   self.assertEqual([f['coverage']['verified_passes'] for f in data['feeds']],[['B','C']]*3);self.assertEqual(data['feeds'][0]['rows'][0]['stars'],10**6+3)
  def test_short_non_last_page_fails_closed(self):
   p=Provider(12195,short_page=5);sleeps=[]
-  with self.assertRaisesRegex(ValueError,'page 5 returned 99, expected 100'):w.refresh_dashboard(prior(300),client_factory=p.factory,sleeper=sleeps.append)
+  with self.assertRaisesRegex(ValueError,'page 5 returned 99, expected 100'):w.refresh_dashboard(prior(300),client_factory=p.factory,top=2000,sleeper=sleeps.append)
   self.assertEqual(sleeps,[910,910])
  def test_shrink_guard_refuses_a_collapsed_feed(self):
   sleeps=[]
-  with self.assertRaisesRegex(ValueError,'day refresh not publishable: 10 rows is under half of min\\(top, previous 300\\)'):w.refresh_dashboard(prior(300),client_factory=Provider(10).factory,sleeper=sleeps.append)
+  with self.assertRaisesRegex(ValueError,'day refresh not publishable: 10 rows is under half of min\\(depth, previous 300\\)'):w.refresh_dashboard(prior(300),client_factory=Provider(10).factory,top=2000,sleeper=sleeps.append)
   self.assertEqual(sleeps,[910])
-  self.assertEqual(len(w.refresh_dashboard(prior(300),client_factory=Provider(150).factory,sleeper=sleeps.append)['feeds'][0]['rows']),150)
-  with self.assertRaisesRegex(ValueError,'999 rows is under half of min\\(top, previous 2000\\)'):w.refresh_dashboard(prior(2000),client_factory=Provider(999).factory,sleeper=sleeps.append)
+  self.assertEqual(len(w.refresh_dashboard(prior(300),client_factory=Provider(150).factory,top=2000,sleeper=sleeps.append)['feeds'][0]['rows']),150)
+  with self.assertRaisesRegex(ValueError,'999 rows is under half of min\\(depth, previous 2000\\)'):w.refresh_dashboard(prior(2000),client_factory=Provider(999).factory,top=2000,sleeper=sleeps.append)
  def test_provider_with_fewer_rows_than_top_reaches_its_end(self):
-  p=Provider(1250);sleeps=[];data=w.refresh_dashboard(prior(1000),client_factory=p.factory,sleeper=sleeps.append)
+  p=Provider(1250);sleeps=[];data=w.refresh_dashboard(prior(1000),client_factory=p.factory,top=2000,sleeper=sleeps.append)
   f=data['feeds'][0];self.assertEqual(len(f['rows']),1250);self.assertTrue(f['coverage']['reached_end']);self.assertEqual(f['coverage']['pages_fetched'],13);self.assertEqual(max(n for _,n in p.pages),13);self.assertEqual(sleeps,[910])
  def test_top_validation(self):
   network=lambda **kw:self.fail('network')
-  for top in (150,50,10100,-100,'2000',2000.0,None,True):
+  for top in (150,50,10100,-100,'2000',2000.0,True):
    with self.assertRaisesRegex(ValueError,'top'):w.refresh_dashboard(prior(1),client_factory=network,top=top)
   with self.assertRaisesRegex(ValueError,'max_pages'):w.refresh_dashboard(prior(1),client_factory=network,top=2000,max_pages=19)
+  for depth,verify in ((150,2000),('some',2000),(0,2000),(2000,150),(2000,0),(2000,'2000'),(2000,True)):
+   with self.assertRaisesRegex(ValueError,'depth|verify_top'):w.refresh_dashboard(prior(1),client_factory=network,depth=depth,verify_top=verify)
+  with self.assertRaisesRegex(ValueError,'max_pages'):w.refresh_dashboard(prior(1),client_factory=network,max_pages=19)
   with tempfile.TemporaryDirectory() as tmp:
    site=site_fixture(tmp,prior(1));out=pathlib.Path(tmp)/'output'
    proc=subprocess.run([sys.executable,str(ROOT/'scripts/weekly_refresh.py'),'--site-dir',str(site),'--output-dir',str(out),'--top','150'],capture_output=True,text=True)
    self.assertEqual(proc.returncode,2);result=json.loads(proc.stdout);self.assertIn('top',result['error']);self.assertTrue(result['current_site_preserved']);self.assertFalse(out.exists())
+
+
+class TwoTierRefreshTests(unittest.TestCase):
+ """--depth all (the default): the head (--verify-top rows) is read twice as before; the tail is read once in pass A."""
+ TOTALS={'day':12195,'week':32694,'month':66772}
+ def test_default_reads_the_whole_feed_and_verifies_only_the_head(self):
+  p=Provider(0,totals=self.TOTALS);sleeps=[];data=w.refresh_dashboard(prior(2000),client_factory=p.factory,sleeper=sleeps.append)
+  self.assertEqual(sleeps,[910])
+  for f in data['feeds']:
+   c=f['coverage'];total=self.TOTALS[f['period']];pages=-(-total//100)
+   self.assertEqual(len(f['rows']),total);self.assertEqual(c['unique_repos'],total);self.assertTrue(c['reached_end']);self.assertEqual(c['pages_fetched'],pages)
+   self.assertEqual((c['depth'],c['verified_top'],c['verified_rows'],c['verified_passes'],c['status']),('all',2000,2000,['A','B'],'complete'))
+   self.assertNotIn('bounded_top',c);self.assertEqual(c['tail']['rows'],total-2000);self.assertEqual(c['tail']['pages_fetched'],pages-20);self.assertEqual(c['tail']['duplicates'],0);self.assertEqual(c['tail']['total_drift'],0)
+   self.assertEqual([r['repo_id'] for r in f['rows']],list(range(1000,1000+total)))  # head then tail, rank order
+   self.assertEqual(f['rows'][0]['stars'],10**6+2);self.assertEqual(f['rows'][2000]['stars'],10**6-2000+1)  # head from pass B, tail from pass A
+   self.assertEqual(f['rows'][2000]['observation']['page'],21);self.assertEqual(f['rows'][0]['created_at'],'2020-01-01T00:00:00Z');self.assertIsNone(f['rows'][2000]['created_at'])
+  self.assertEqual(len(p.pages),sum(-(-t//100) for t in self.TOTALS.values())+60)  # pass A whole feed, pass B 20 pages per period
+  self.assertEqual(p.pages[:2],[('day',1),('day',2)]);self.assertEqual(p.pages.index(('day',21)),20)
+ def test_tail_total_drift_is_tolerated_and_recorded(self):
+  p=Provider(12195,drift=(80,12260));data=w.refresh_dashboard(prior(2000),client_factory=p.factory,sleeper=lambda s:None)
+  c=data['feeds'][0]['coverage'];self.assertEqual((c['reported_total'],c['last_reported_total'],c['status']),(12195,12260,'inconsistent'))
+  self.assertEqual(c['tail']['total_drift'],65);self.assertIn('tail: provider total changed from 12195 to 12260 at page 80',c['warnings']);self.assertEqual(len(data['feeds'][0]['rows']),12260)
+ def test_tail_under_98_percent_of_the_reported_total_fails_closed(self):
+  # Pages 21..122 each lose 3 rows (306 rows, 2.5%): refused. Losing 2 rows each (204 rows, 1.7%) is published with the shortfall recorded.
+  with self.assertRaisesRegex(ValueError,'day refresh not publishable: 11889 unique rows is under 98% of the 12195 reported; current site unchanged'):
+   w.refresh_dashboard(prior(2000),client_factory=Provider(12195,short_pages=(21,3)).factory,sleeper=lambda s:None)
+  data=w.refresh_dashboard(prior(2000),client_factory=Provider(12195,short_pages=(21,2)).factory,sleeper=lambda s:None)
+  f=data['feeds'][0];self.assertEqual(len(f['rows']),11991);self.assertEqual(f['coverage']['tail']['required_rows'],11952);self.assertEqual(f['coverage']['status'],'inconsistent')
+  self.assertIn('tail: page 21 returned 98, expected 100',f['coverage']['warnings']);self.assertEqual(len(f['coverage']['warnings']),102)
+ def test_tail_duplicates_keep_the_best_rank_and_count_against_coverage(self):
+  p=Provider(12195,duplicate_page=30)  # page 30's first row repeats id 1000 (rank 1): the head row stays, the tail loses one unique row
+  data=w.refresh_dashboard(prior(2000),client_factory=p.factory,sleeper=lambda s:None)
+  f=data['feeds'][0];ids=[r['repo_id'] for r in f['rows']];self.assertEqual(len(ids),len(set(ids)));self.assertEqual(len(ids),12194)
+  self.assertEqual(f['rows'][0]['observation']['page'],1);self.assertEqual(f['coverage']['tail']['duplicates'],0);self.assertEqual(f['coverage']['tail']['overlap_with_verified_top'],1)
+  p=Provider(12195,duplicate_page=30);p.duplicate_page=None
+  def tail_duplicate(url):
+   payload=p(url);q=dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
+   if int(q['page'])==40:payload['data'][0]=dict(payload['data'][0],id=1000+29*100)  # repeats page 30's first id
+   return payload
+  data=w.refresh_dashboard(prior(2000),client_factory=lambda **kw:FeedClient(fetch=tail_duplicate,**kw),sleeper=lambda s:None)
+  f=data['feeds'][0];c=f['coverage'];self.assertEqual(c['tail']['duplicates'],1);self.assertEqual(c['unique_repos'],12194)
+  self.assertEqual(next(r for r in f['rows'] if r['repo_id']==1000+29*100)['observation']['page'],30);self.assertIn('tail: 1 duplicate provider IDs across pages; best-ranked observed row retained',c['warnings'])
+ def test_tail_fetch_failure_or_stop_before_the_end_fails_closed(self):
+  with self.assertRaisesRegex(ValueError,'day refresh not publishable: tail URLError: <urlopen error synthetic connection reset>; current site unchanged'):
+   w.refresh_dashboard(prior(2000),client_factory=lambda **kw:Provider(12195,fail_page=50).factory(max_attempts=1,**kw),sleeper=lambda s:None)
+  with self.assertRaisesRegex(ValueError,'day refresh not publishable: tail stopped after 80 pages before the provider end; current site unchanged'):
+   w.refresh_dashboard(prior(2000),client_factory=Provider(12195).factory,max_pages=100,sleeper=lambda s:None)
+ def test_head_mismatch_retries_only_the_head_and_the_tail_stays_from_pass_a(self):
+  p=Provider(12195,drop_after=('day',1));sleeps=[];data=w.refresh_dashboard(prior(2000),client_factory=p.factory,sleeper=sleeps.append)
+  day=data['feeds'][0];ids=[r['repo_id'] for r in day['rows']]
+  self.assertEqual(sleeps,[910,910]);self.assertEqual(day['coverage']['verified_passes'],['B','C']);self.assertEqual(ids[:2000],list(range(1001,3001)))
+  self.assertEqual(ids,list(range(1001,1000+12196)));self.assertEqual(day['coverage']['tail']['overlap_with_verified_top'],0)  # old rank 2001 moved into the head; the tail starts at old rank 2002
+  self.assertEqual(len(p.pages),122*3+60+20)
+ def test_head_passes_that_keep_disagreeing_fail_closed_before_any_tail_is_used(self):
+  p=Provider(12195,shift_every_pass=True)
+  with self.assertRaisesRegex(ValueError,'day refresh not publishable: membership or order changed between passes; current site unchanged'):
+   w.refresh_dashboard(prior(2000),client_factory=p.factory,sleeper=lambda s:None)
+ def test_shrink_guard_is_half_of_the_previous_published_rows(self):
+  with self.assertRaisesRegex(ValueError,'day refresh not publishable: 12195 rows is under half of min\\(depth, previous 30000\\); current site unchanged'):
+   w.refresh_dashboard(prior(30000),client_factory=Provider(12195).factory,sleeper=lambda s:None)
+  self.assertEqual(len(w.refresh_dashboard(prior(2000),client_factory=Provider(12195).factory,sleeper=lambda s:None)['feeds'][0]['rows']),12195)  # growth from 2,000 is fine
+  self.assertEqual(len(w.refresh_dashboard(prior(24000),client_factory=Provider(12195).factory,sleeper=lambda s:None)['feeds'][0]['rows']),12195)
+ def test_bounded_depth_keeps_todays_behaviour_and_alias(self):
+  p=Provider(12195);data=w.refresh_dashboard(prior(300),client_factory=p.factory,depth=2000,verify_top=2000,sleeper=lambda s:None)
+  f=data['feeds'][0];self.assertEqual((len(f['rows']),f['coverage']['bounded_top'],f['coverage']['verified_passes'],f['coverage']['tail'],f['coverage']['reached_end']),(2000,2000,['A','B'],None,False))
+  self.assertEqual(len(p.pages),120)
+  p=Provider(12195);data=w.refresh_dashboard(prior(300),client_factory=p.factory,depth=3000,verify_top=2000,sleeper=lambda s:None)
+  f=data['feeds'][0];self.assertEqual((len(f['rows']),f['coverage']['bounded_top'],f['coverage']['verified_rows'],f['coverage']['tail']['pages_fetched'],f['coverage']['reached_end'],f['coverage']['status']),(3000,3000,2000,10,False,'partial'))
+  self.assertEqual(len(p.pages),30*3+60)
+ def test_checkpoints_keep_head_tail_verify_and_retry_apart(self):
+  p=Provider(12195,drop_after=('day',1))
+  with tempfile.TemporaryDirectory() as tmp:
+   site=site_fixture(tmp,prior(2000));out=pathlib.Path(tmp)/'output';cp=pathlib.Path(tmp)/'cp'
+   with patch.object(w.time,'sleep',lambda s:None):w.stage_site(site,out,'refresh',client_factory=p.factory,checkpoint_dir=cp,created_dates=lambda data:{'requested':0})
+   self.assertEqual(sorted(d.name for d in cp.iterdir()),['day','day-retry','day-tail','day-verify','month','month-tail','month-verify','week','week-tail','week-verify'])
+   self.assertTrue((cp/'day-tail'/'day-100-000021.json').exists());self.assertTrue((cp/'day-tail'/'day-100-000122.json').exists());self.assertFalse((cp/'day-tail'/'day-100-000020.json').exists())
+ def test_cli_depth_and_verify_top_are_validated(self):
+  with tempfile.TemporaryDirectory() as tmp:
+   site=site_fixture(tmp,prior(1));out=pathlib.Path(tmp)/'output'
+   for args in (['--depth','150'],['--depth','x'],['--verify-top','150'],['--top','150']):
+    proc=subprocess.run([sys.executable,str(ROOT/'scripts/weekly_refresh.py'),'--site-dir',str(site),'--output-dir',str(out),*args],capture_output=True,text=True)
+    self.assertNotEqual(proc.returncode,0,args);self.assertFalse(out.exists())
