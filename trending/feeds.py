@@ -64,7 +64,7 @@ class FeedClient:
     @staticmethod
     def _fetch(url):
         request = urllib.request.Request(url, headers={'User-Agent': 'star-growth-dashboard (+https://github.com/neo-giga/star-growth-dashboard)',
-                                                       'Accept': 'application/json'})
+                                                       'Accept': 'application/json', 'Cache-Control': 'no-cache'})
         with urllib.request.urlopen(request, timeout=60) as response:
             data = response.read(20 * 1024 * 1024 + 1)
         if len(data) > 20 * 1024 * 1024:

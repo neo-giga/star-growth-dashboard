@@ -59,6 +59,17 @@ class FeedTests(unittest.TestCase):
         s = FeedStore(self.root / 'feeds.sqlite3')
         return self.enterContext(s)
 
+    def test_fetch_identifies_itself_and_asks_caches_to_revalidate(self):
+        seen = []
+        class Response:
+            def __enter__(self): return self
+            def __exit__(self, *args): return False
+            def read(self, limit): return b'{"ok": true}'
+        with mock.patch('trending.feeds.urllib.request.urlopen', side_effect=lambda request, timeout: (seen.append(request), Response())[1]):
+            self.assertEqual(FeedClient._fetch('https://gittrend.io/api/trending?time=day&page=1&limit=100'), {'ok': True})
+        self.assertEqual(seen[0].get_header('Cache-control'), 'no-cache')
+        self.assertEqual(seen[0].get_header('User-agent'), 'star-growth-dashboard (+https://github.com/neo-giga/star-growth-dashboard)')
+
     def test_pagination_fetches_every_page_with_consistent_coverage(self):
         c, f = client(page([repo(1), repo(2)], total=3, pages=2, more=True, limit=2),
                       page([repo(3)], number=2, total=3, pages=2, limit=2))

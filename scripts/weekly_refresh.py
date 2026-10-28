@@ -2,7 +2,8 @@
 
 validate-current exercises export/deployment plumbing, not new data collection.
 Refresh mode reads the provider's top N rows per period (--top, default 2000) twice, past the
-provider's edge cache, and publishes only when both reads agree; --top 0 is the strict whole-feed rule.
+provider's whole advertised cache window, and publishes only when both reads agree; --top 0 is the
+strict whole-feed rule.
 Public cached GitHub metadata is carried only for same period/provider ID/name.
 """
 from __future__ import annotations
@@ -11,7 +12,9 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from trending.feeds import FeedClient, collect_feed
 from fill_created_dates import fill_created_dates
-RETRY_DELAY = 330  # seconds: outlasts GitTrend's 300 s edge cache before a failed period is re-read from page 1
+# GitTrend answers with Cache-Control: s-maxage=300, stale-while-revalidate=600, so a shared cache may replay a response
+# for up to 900 s. Every later pass starts after that whole window plus a margin, so it cannot be served pass A's pages.
+RETRY_DELAY = 300 + 600 + 10
 
 
 def local_asset(root, name):
@@ -122,7 +125,7 @@ def collect_strict(client_factory, max_pages, checkpoint_dir):
 
 
 def collect_bounded(client_factory, top, checkpoint_dir, sleeper):
-    """Pass A, one RETRY_DELAY wait (past the edge cache), pass B of the same pages: a period publishes its later pass when
+    """Pass A, one RETRY_DELAY wait (past the provider's cache window), pass B of the same pages: a period publishes its later pass when
     both passes satisfy bounded_problem with the identical ordered IDs. Otherwise one more wait and a pass C for the
     unstable periods, accepted only when it agrees with B the same way."""
     wait = sleeper or time.sleep

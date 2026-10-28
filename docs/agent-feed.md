@@ -72,10 +72,11 @@ before publication: every requested page full except a genuine last page, no
 duplicate provider IDs, min(top, provider total) rows, and no period shrinking
 below half of min(top, previous rows). Because a rank shift between two page
 reads can skip a repository while every page stays full, each period is read
-twice, 330 s apart (past the provider's edge cache), and publishes the later
-pass only when both have the identical ordered ID list (`coverage.verified_passes`);
-a period whose passes differ is read a third time after another 330 s and must
-match the second. Otherwise the previous public catalog stays unchanged. A
+twice, 910 s apart (past the provider's advertised cache window: s-maxage 300 s
+plus stale-while-revalidate 600 s, so a cache cannot replay the first read),
+and publishes the later pass only when both have the identical ordered ID list
+(`coverage.verified_passes`); a period whose passes differ is read a third time
+after another 910 s and must match the second. Otherwise the previous public catalog stays unchanged. A
 `top=0` run applies the strict whole-feed rule instead. Metadata is not bulk-refetched: unchanged
 provider-ID/name matches may retain cached metadata with its original observed
  time. A validation/redeployment run is not a new data retrieval. Consult the
