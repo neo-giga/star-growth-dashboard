@@ -1,8 +1,8 @@
 """Stage a complete refresh without mutating the currently published site.
 
 validate-current exercises export/deployment plumbing, not new data collection.
-Refresh mode reads the provider's top N rows per period (--top, default 2000); --top 0 is
-the strict whole-feed rule.
+Refresh mode reads the provider's top N rows per period (--top, default 2000) twice, past the
+provider's edge cache, and publishes only when both reads agree; --top 0 is the strict whole-feed rule.
 Public cached GitHub metadata is carried only for same period/provider ID/name.
 """
 from __future__ import annotations
@@ -80,6 +80,75 @@ def bounded_problem(result, top):
     return None
 
 
+def stability_problem(earlier, later, top):
+    """Why two reads of a period's pages do not establish its top-N membership, or None. Full, duplicate-free pages cannot
+    show that a repository which changed rank between two page reads was not skipped; two passes with the identical
+    ordered ID list can."""
+    for label, result in (('earlier', earlier), ('later', later)):
+        problem = bounded_problem(result, top)
+        if problem:
+            return f'{label} pass: {problem}'
+    if [r['repo_id'] for r in earlier['rows']] != [r['repo_id'] for r in later['rows']]:
+        return 'membership or order changed between passes'
+    return None
+
+
+def read_period(client_factory, period, cache, max_pages):
+    client = client_factory(cache_dir=cache, resume=False)
+    if client_factory is FeedClient:
+        fetch = client.fetch
+        last = [None]
+        def paced_fetch(url):
+            if last[0] is not None:
+                time.sleep(max(0.0, 1.0 - (time.monotonic() - last[0])))
+            last[0] = time.monotonic()
+            return fetch(url)
+        client.fetch = paced_fetch
+    return collect_feed(client, period, max_pages=max_pages)
+
+
+def collect_strict(client_factory, max_pages, checkpoint_dir):
+    collected = {}
+    for period in ('day','week','month'):
+        cache = pathlib.Path(checkpoint_dir) / period if checkpoint_dir else None
+        result = read_period(client_factory, period, cache, max_pages)
+        coverage = result['coverage']
+        if (coverage['status'] != 'complete' or not coverage['reached_end'] or
+                coverage['unique_repos'] != coverage['reported_total'] or
+                coverage['last_reported_total'] != coverage['reported_total'] or coverage['duplicates']):
+            raise ValueError(f'{period} refresh not publishable: {coverage["status"]}; current site unchanged')
+        collected[period] = result
+    return collected
+
+
+def collect_bounded(client_factory, top, checkpoint_dir, sleeper):
+    """Pass A, one RETRY_DELAY wait (past the edge cache), pass B of the same pages: a period publishes its later pass when
+    both passes satisfy bounded_problem with the identical ordered IDs. Otherwise one more wait and a pass C for the
+    unstable periods, accepted only when it agrees with B the same way."""
+    wait = sleeper or time.sleep
+    passes = {period: [] for period in ('day','week','month')}
+    for suffix in ('', '-verify'):
+        if suffix:
+            wait(RETRY_DELAY)
+        for period in passes:
+            cache = pathlib.Path(checkpoint_dir) / (period + suffix) if checkpoint_dir else None
+            passes[period].append(read_period(client_factory, period, cache, top // 100))
+    unstable = [period for period in passes if stability_problem(*passes[period][-2:], top)]
+    if unstable:
+        wait(RETRY_DELAY)
+        for period in unstable:
+            cache = pathlib.Path(checkpoint_dir) / f'{period}-retry' if checkpoint_dir else None
+            passes[period].append(read_period(client_factory, period, cache, top // 100))
+    collected = {}
+    for period, runs in passes.items():
+        problem = stability_problem(*runs[-2:], top)
+        if problem:
+            raise ValueError(f'{period} refresh not publishable: {problem}; current site unchanged')
+        runs[-1]['coverage']['verified_passes'] = ['A', 'B'] if len(runs) == 2 else ['B', 'C']
+        collected[period] = runs[-1]
+    return collected
+
+
 def refresh_dashboard(current, client_factory=FeedClient, max_pages=1000, checkpoint_dir=None, top=2000, sleeper=None):
     validate_dashboard(current)
     if type(max_pages) is not int or not 1 <= max_pages <= 1000:
@@ -89,35 +158,10 @@ def refresh_dashboard(current, client_factory=FeedClient, max_pages=1000, checkp
     if top > max_pages * 100:
         raise ValueError('max_pages bound is below the pages top needs')
     results = []
+    collected = collect_bounded(client_factory, top, checkpoint_dir, sleeper) if top else collect_strict(client_factory, max_pages, checkpoint_dir)
     for period in ('day','week','month'):
-        for attempt in (1, 2):
-            cache = pathlib.Path(checkpoint_dir) / (period if attempt == 1 else f'{period}-retry') if checkpoint_dir else None
-            client = client_factory(cache_dir=cache, resume=False)
-            if client_factory is FeedClient:
-                fetch = client.fetch
-                last = [None]
-                def paced_fetch(url):
-                    if last[0] is not None:
-                        time.sleep(max(0.0, 1.0 - (time.monotonic() - last[0])))
-                    last[0] = time.monotonic()
-                    return fetch(url)
-                client.fetch = paced_fetch
-            result = collect_feed(client, period, max_pages=top // 100 if top else max_pages)
-            coverage = result['coverage']
-            if top:
-                problem = bounded_problem(result, top)
-            elif (coverage['status'] != 'complete' or not coverage['reached_end'] or
-                    coverage['unique_repos'] != coverage['reported_total'] or
-                    coverage['last_reported_total'] != coverage['reported_total'] or coverage['duplicates']):
-                problem = coverage['status']
-            else:
-                problem = None
-            if problem is None:
-                break
-            if top and attempt == 1:
-                (sleeper or time.sleep)(RETRY_DELAY)
-                continue
-            raise ValueError(f'{period} refresh not publishable: {problem}; current site unchanged')
+        result = collected[period]
+        coverage = result['coverage']
         prior_feed = next(f for f in current['feeds'] if f['period'] == period)
         if top:
             # Shrink guard: a valid-looking feed that lost over half of min(top, previous rows) is a broken provider response.
@@ -196,7 +240,7 @@ def stage_site(site_dir, output_dir, mode='refresh', max_pages=1000, checkpoint_
         os.replace(stage,output)
     return {'mode':mode,'new_retrieval':mode=='refresh','top':top if mode == 'refresh' else None,'output':str(output),'created_dates':created,
             'periods':[{ 'period':f['period'],'rows':len(f['rows']),'status':f['coverage']['status'],
-                        'fetched_at_end':f['fetched_at_end']} for f in data['feeds']]}
+                        'verified_passes':f['coverage'].get('verified_passes'),'fetched_at_end':f['fetched_at_end']} for f in data['feeds']]}
 
 
 def main():
