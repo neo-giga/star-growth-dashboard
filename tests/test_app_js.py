@@ -1,0 +1,43 @@
+"""Exercise the released app JS helpers under node: Link-count parsing, GitHub outcome mapping, labels."""
+import json,pathlib,re,shutil,subprocess,unittest
+ROOT=pathlib.Path(__file__).resolve().parents[1]
+APP=ROOT/re.search(r'<script[^>]+src="([^"]+)"',(ROOT/'index.html').read_text())[1]
+def run(script):
+ proc=subprocess.run(['node','-e',f"const app=require({json.dumps(str(APP))});{script}"],capture_output=True,text=True,check=True)
+ return json.loads(proc.stdout)
+@unittest.skipUnless(shutil.which('node'),'node not installed')
+class AppJsTests(unittest.TestCase):
+ def test_link_count_uses_last_page_else_body_length(self):
+  link='<https://api.github.com/repositories/1/contributors?per_page=1&anon=true&page=2>; rel="next", <https://api.github.com/repositories/1/contributors?per_page=1&anon=true&page=344>; rel="last"'
+  self.assertEqual(run(f'console.log(JSON.stringify([app.linkCount({json.dumps(link)},1),app.linkCount(null,1),app.linkCount(null,0),app.linkCount(undefined,-3),app.linkCount("<x?page=5>; rel=\\"next\\"",1)]))'),[344,1,0,0,1])
+ def test_count_outcome_maps_statuses(self):
+  script='''const h=o=>k=>o[k]??null;const r=[
+   app.countOutcome(200,h({link:'<u?per_page=1&page=18210>; rel="last"'}),[{}]),
+   app.countOutcome(200,h({}),[]),app.countOutcome(204,h({}),null),
+   app.countOutcome(403,h({'x-ratelimit-remaining':'0','x-ratelimit-reset':'1793171427'}),{message:'API rate limit exceeded for 1.2.3.4.'}),
+   app.countOutcome(429,h({}),{message:'You have exceeded a secondary rate limit'}),
+   app.countOutcome(403,h({'x-ratelimit-remaining':'41'}),{message:'The history or contributor list is too large to list contributors for this repository via the API.'}),
+   app.countOutcome(404,h({}),{message:'Not Found'}),app.countOutcome(451,h({}),null),app.countOutcome(500,h({}),null)];console.log(JSON.stringify(r))'''
+  self.assertEqual(run(script),[
+   {'value':18210,'cache':True,'limit':None},{'value':0,'cache':True,'limit':None},{'value':0,'cache':True,'limit':None},
+   {'value':None,'cache':False,'limit':{'reset':1793171427000}},{'value':None,'cache':False,'limit':{'reset':None}},
+   {'value':'too_many','cache':True,'limit':None},{'value':'unavailable','cache':True,'limit':None},{'value':'unavailable','cache':True,'limit':None},{'value':'unavailable','cache':False,'limit':None}])
+ def test_labels(self):
+  self.assertEqual(run('console.log(JSON.stringify([app.countLabel(18210),app.countLabel("too_many"),app.countLabel("unavailable"),app.countLabel(null),app.creationLabel("2026-04-14T00:51:32+00:00"),app.creationLabel(null),app.clockLabel(1793171427000),app.displayNumber(null),app.displayNumber(5,true)]))'),
+   ['18,210','too many to count','unavailable','—','Apr 14, 2026','—','07:10 UTC','—','+5'])
+ def test_count_loader_caches_definite_results_in_storage(self):
+  script='''(async()=>{const store=new Map(),storage={getItem:k=>store.get(k)??null,setItem:(k,v)=>store.set(k,v)};let calls=[];
+   const headers=o=>({get:k=>o[k.toLowerCase()]??null});
+   const fetcher=async url=>{calls.push(url);if(url.includes('/contributors'))return {status:200,headers:headers({link:'<u?page=344>; rel="last"'}),json:async()=>[{}]};
+    if(url.includes('/issues/'))return {status:403,headers:headers({'x-ratelimit-remaining':'0','x-ratelimit-reset':'1793171427'}),json:async()=>({message:'API rate limit exceeded'})};
+    return {status:404,headers:headers({}),json:async()=>({message:'Not Found'})};};
+   const load=app.createCountLoader(fetcher,storage,()=>1793170000000);const seen=[];
+   const first=await load('morluto/rea',(f,v)=>seen.push([f,v]));const second=await load('morluto/rea');
+   console.log(JSON.stringify({first,second,calls:calls.length,stored:JSON.parse(store.get('gh-counts:morluto/rea')),seen}));})()'''
+  out=run(script)
+  self.assertEqual(out['first']['fields'],{'contributors':344,'issue_comments':None,'pr_review_comments':'unavailable'});self.assertEqual(out['first']['limit'],{'reset':1793171427000});self.assertTrue(out['first']['fetched'])
+  self.assertEqual(out['stored'],{'fetched_at':'2026-10-28T06:46:40.000Z','fields':{'contributors':344,'pr_review_comments':'unavailable'}})
+  self.assertEqual(out['calls'],4);self.assertEqual(out['second']['fields']['contributors'],344);self.assertEqual(out['second']['limit'],{'reset':1793171427000})
+  self.assertEqual(out['calls'],4)
+ def test_count_loader_rejects_unsafe_names_without_fetching(self):
+  self.assertEqual(run('''(async()=>{let n=0;const load=app.createCountLoader(async()=>{n++;},{getItem:()=>null,setItem(){}});try{await load('../evil');console.log('no')}catch(e){console.log(JSON.stringify([e.message,n,app.apiRepoPath('o/.'),app.apiRepoPath('a/b c'),app.apiRepoPath('morluto/rea')]))}})()'''),['Invalid repository name',0,None,None,'morluto/rea'])
