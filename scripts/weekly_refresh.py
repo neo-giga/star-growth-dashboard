@@ -13,8 +13,8 @@ import argparse, copy, datetime as dt, gzip, json, math, os, pathlib, shutil, su
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from trending.feeds import FeedClient, collect_feed
-from trending.published import (LIVE_SITE, LiveSite, LocalSite, checkout_data_files, hydrate_metadata, read_site_data, read_snapshot,
-                                seed_created_dates, snapshot_records, validate_dashboard, write_snapshot)
+from trending.published import (LIVE_SITE, LiveSite, LocalSite, checkout_data_files, hydrate_metadata, latest_publication, read_site_data,
+                                read_snapshot, seed_created_dates, snapshot_records, validate_dashboard, write_snapshot)
 from fill_created_dates import fill_created_dates
 # GitTrend answers with Cache-Control: s-maxage=300, stale-while-revalidate=600, so a shared cache may replay a response
 # for up to 900 s. Every later pass starts after that whole window plus a margin, so it cannot be served pass A's pages.
@@ -40,35 +40,27 @@ def read_ui_source(site):
     return ui
 
 
-def read_published(published, checkout, mode):
-    """What the last publication holds: {'source', 'data', 'snapshot', 'notes'}. The live site is authoritative; a refresh falls
-    back to the checkout's newest data file (carry-over only), a validate-current does not (re-publishing checkout data could roll
-    the live site back) and fails closed instead."""
-    notes = []
+def read_published(published, mode):
+    """What the last publication holds: {'source', 'site', 'files', 'data', 'snapshot', 'notes'}, read from the previous publication
+    (normally the newest successful run's Pages artifact). Anything unreadable fails closed: publishing from an older record, such as
+    the checkout's frozen data files, could roll published data or carried creation dates back."""
+    notes = list(getattr(published, 'notes', []))
     try:
-        data, _ = read_site_data(published)
-        source, site = f'live:{published}', published
-    except Exception as exc:  # noqa: BLE001 - any failure to read the live site is reported, never hidden
-        notes.append(f'live site unreadable: {type(exc).__name__}: {str(exc)[:200]}')
-        if mode != 'refresh':
-            raise ValueError(f'{mode} needs the live site; {notes[-1]}; current site unchanged') from exc
-        candidates = checkout_data_files(checkout)
-        if not candidates:
-            raise ValueError(f'no previous data: {notes[-1]} and the checkout holds no dashboard data file') from exc
-        data, site = candidates[0][2], LocalSite(checkout)
-        source = 'checkout:' + ','.join(candidates[0][1])
+        data, files = read_site_data(published)
+    except Exception as exc:  # noqa: BLE001 - any failure to read the previous publication is reported, never hidden
+        raise ValueError(f'previous publication unreadable from {published}: {type(exc).__name__}: {str(exc)[:200]}; current site unchanged') from exc
     snapshot = None
     snapshot_id = data.get('agent_snapshot_id')
     if snapshot_id:
         try:
-            snapshot = read_snapshot(site, snapshot_id, 'all' if mode != 'refresh' else 'records')
+            snapshot = read_snapshot(published, snapshot_id, 'all' if mode != 'refresh' else 'records')
         except Exception as exc:  # noqa: BLE001
-            notes.append(f'published snapshot {snapshot_id[:12]} unreadable from {site}: {type(exc).__name__}: {str(exc)[:200]}')
+            notes.append(f'published snapshot {snapshot_id[:12]} unreadable from {published}: {type(exc).__name__}: {str(exc)[:200]}')
             if mode != 'refresh':
                 raise ValueError(f'{mode} needs the published snapshot; {notes[-1]}; current site unchanged') from exc
     elif mode != 'refresh':
         raise ValueError(f'{mode} needs published data that names its snapshot; current site unchanged')
-    return {'source': source, 'data': data, 'snapshot': snapshot, 'notes': notes}
+    return {'source': str(published), 'site': published, 'files': files, 'data': data, 'snapshot': snapshot, 'notes': notes}
 
 
 def bounded_problem(result, top):
@@ -310,8 +302,9 @@ def verified_feeds(data):
 def stage_site(site_dir, output_dir, mode='refresh', max_pages=1000, checkpoint_dir=None,
                client_factory=FeedClient, export_builder=None, created_dates=fill_created_dates, top=None, depth='all', verify_top=2000,
                published=None):
-    """Stage the next site under output_dir: the checkout's UI sources plus either a fresh refresh (prior state from the published
-    site for carry-over and the shrink guard) or the published data and snapshot re-released with the current UI."""
+    """Stage the next site under output_dir: the checkout's UI sources plus either a fresh refresh (prior state from the previous
+    publication for carry-over and the shrink guard) or the previous publication's data and snapshot re-released with the current UI.
+    published: the previous publication as a site (LocalSite of its artifact; LiveSite only on explicit request)."""
     site, output = pathlib.Path(site_dir).resolve(), pathlib.Path(output_dir).resolve()
     if output.exists() or output == site or site in output.parents:
         raise ValueError('output must be a new directory outside current site')
@@ -321,7 +314,9 @@ def stage_site(site_dir, output_dir, mode='refresh', max_pages=1000, checkpoint_
         resolve_depth(top, depth, verify_top, max_pages)  # reject bad options before touching the published site
     ui = read_ui_source(site)
     from trending.agent_feed import METADATA_FIELDS, build_agent_exports, build_ui_files
-    prior = read_published(published if published is not None else LiveSite(), site, mode)
+    if published is None:
+        raise ValueError('no previous publication given; current site unchanged')
+    prior = read_published(published, mode)
     current, notes = prior['data'], list(prior['notes'])
     if mode == 'refresh':
         hydrated = hydrate_metadata(current, snapshot_records(prior['snapshot']), METADATA_FIELDS) if prior['snapshot'] else 0
@@ -357,6 +352,27 @@ def stage_site(site_dir, output_dir, mode='refresh', max_pages=1000, checkpoint_
                         'tail':f['coverage'].get('tail'),'verified_passes':f['coverage'].get('verified_passes'),'fetched_at_end':f['fetched_at_end']} for f in data['feeds']]}
 
 
+def previous_publication(args, env):
+    """The previous publication: --published-dir or --published-site when given; in GitHub Actions the github-pages artifact of the
+    newest successful run, or, with --bootstrap-from-live and no readable artifact, the live site (said in the diagnostic notes)."""
+    if args.published_dir:
+        return LocalSite(args.published_dir, label=f'dir:{pathlib.Path(args.published_dir).resolve()}')
+    if args.published_site:
+        return LiveSite(args.published_site)
+    if env.get('GITHUB_ACTIONS') != 'true':
+        raise ValueError('outside GitHub Actions pass --published-dir (an extracted github-pages artifact) or --published-site URL')
+    try:
+        return latest_publication(env['GITHUB_REPOSITORY'], env['GH_TOKEN'], tempfile.mkdtemp(prefix='published-', dir=env.get('RUNNER_TEMP')),
+                                  env.get('GITHUB_API_URL', 'https://api.github.com'))
+    except Exception as exc:  # noqa: BLE001
+        reason = f'publication artifact unreadable: {type(exc).__name__}: {str(exc)[:200]}'
+        if not args.bootstrap_from_live:
+            raise ValueError(f'{reason}; current site unchanged (dispatch once with bootstrap_from_live to start from the live site)') from exc
+        site = LiveSite(LIVE_SITE)
+        site.notes = [f'bootstrap_from_live: {reason}; previous publication read from the live site {LIVE_SITE}']
+        return site
+
+
 def depth_argument(value):
     if value == 'all':
         return value
@@ -372,10 +388,13 @@ def main():
     p.add_argument('--depth',type=depth_argument,default='all',help="rows per period: all (default, whole feed) or a multiple of 100 (today's bounded behaviour for that depth)")
     p.add_argument('--verify-top',type=int,default=2000,help='rows per period read twice and published only when both reads agree (multiple of 100, 100..10000)')
     p.add_argument('--top',type=int,default=None,help='alias for --depth N --verify-top N; 0 reads the whole feed under the strict rule')
-    p.add_argument('--published-site',default=LIVE_SITE,help='URL of the currently published site, read for carry-over (refresh) or re-release (validate-current)')
+    source=p.add_mutually_exclusive_group()
+    source.add_argument('--published-dir',help='an extracted github-pages artifact holding the previous publication (local runs)')
+    source.add_argument('--published-site',help='explicit opt-in: read the previous publication from this live URL (may be stale)')
+    p.add_argument('--bootstrap-from-live',action='store_true',help=f'in Actions only: when no publication artifact is readable, read {LIVE_SITE} once instead of failing')
     p.add_argument('--checkpoint-dir');p.add_argument('--diagnostic');a=p.parse_args()
     try:
-        result=stage_site(a.site_dir,a.output_dir,a.mode,a.max_pages,a.checkpoint_dir,top=a.top,depth=a.depth,verify_top=a.verify_top,published=LiveSite(a.published_site));code=0
+        result=stage_site(a.site_dir,a.output_dir,a.mode,a.max_pages,a.checkpoint_dir,top=a.top,depth=a.depth,verify_top=a.verify_top,published=previous_publication(a,os.environ));code=0
     except Exception as exc:
         result={'mode':a.mode,'status':'failed','error':f'{type(exc).__name__}: {str(exc)[:500]}','current_site_preserved':True};code=2
     if a.diagnostic:

@@ -44,21 +44,21 @@ class WeeklyRefreshTests(unittest.TestCase):
   for fn in (factory(name='new/r'),factory(rid=2)):
    r=w.refresh_dashboard(current(),client_factory=fn,sleeper=lambda s:None)['feeds'][0]['rows'][0]
    self.assertIsNone(r['metadata']);self.assertIsNone(r['created_at'])
- def test_validate_current_re_releases_the_live_data_and_snapshot_verbatim(self):
+ def test_validate_current_re_releases_the_previous_data_and_snapshot_verbatim(self):
   with tempfile.TemporaryDirectory() as tmp:
    site=checkout(tmp);pub=publish(tmp,current());out=pathlib.Path(tmp)/'output';served=live(pub)
    result=w.stage_site(site,out,'validate-current',client_factory=lambda **kw:self.fail('network'),published=served)
-   self.assertFalse(result['new_retrieval']);self.assertEqual(result['previous_published'],'live:https://example.test/site/');self.assertIsNone(result['created_dates'])
+   self.assertFalse(result['new_retrieval']);self.assertEqual(result['previous_published'],'https://example.test/site/');self.assertIsNone(result['created_dates'])
    data=w.read_current(out);self.assertEqual([f['fetched_at_end'] for f in data['feeds']],['2026-01-01T00:00:00Z']*3);self.assertEqual([f['rows'][0]['stars'] for f in data['feeds']],[100,100,100])
    self.assertEqual(data['agent_snapshot_id'],w.read_current(pub)['agent_snapshot_id']);self.assertFalse((out/'private-note.txt').exists())
    snapshot=[p for p in listing(pub) if p.startswith('api/')];self.assertEqual([p for p in listing(out) if p.startswith('api/')],snapshot)
    for name in snapshot:self.assertEqual((out/name).read_bytes(),(pub/name).read_bytes(),name)
    self.assertEqual(served.requests,2+3+3+len([p for p in snapshot if '/snapshots/' in p and not p.endswith('schema.json')]))  # index, app, 3 windows, catalog+manifest+schema, snapshot files
    self.assertEqual(sorted(p for p in listing(out) if not p.startswith(('api/','app.','data-','style.'))),['.nojekyll','docs/agent-feed.md','index.html','llms.txt'])
- def test_validate_current_fails_closed_without_the_live_site(self):
+ def test_validate_current_fails_closed_without_the_previous_publication(self):
   with tempfile.TemporaryDirectory() as tmp:
    site=checkout(tmp,('data.json',current()));out=pathlib.Path(tmp)/'output'
-   with self.assertRaisesRegex(ValueError,'validate-current needs the live site; live site unreadable: URLError: .*no route to the live site.*; current site unchanged'):
+   with self.assertRaisesRegex(ValueError,'previous publication unreadable from https://example.test/site/: URLError: .*no route to the live site.*; current site unchanged'):
     w.stage_site(site,out,'validate-current',published=offline())
    self.assertFalse(out.exists())
    pub=publish(tmp,current());(pub/'api/v1/catalog.json').write_text('{"snapshot_id":"0000"}')
@@ -77,15 +77,21 @@ class WeeklyRefreshTests(unittest.TestCase):
    self.assertEqual([f['rows'][0]['created_at'] for f in data['feeds']],['2024-01-02T03:04:05+00:00']*3)
    result=w.stage_site(site,pathlib.Path(tmp)/'validated','validate-current',created_dates=lambda data:self.fail('network'),published=LocalSite(out))
    self.assertIsNone(result['created_dates']);self.assertEqual(result['snapshot_id'],w.read_current(out)['agent_snapshot_id'])
- def test_refresh_falls_back_to_the_checkouts_newest_data_file_and_seeds_from_older_ones(self):
+ def test_refresh_fails_closed_without_the_previous_publication_and_never_falls_back_to_the_checkout(self):
+  # Codex full-lists review #3: the checkout's frozen data files lack every date learned since; publishing from them (with GitHub
+  # lookups down) would turn carried creation dates back into nulls and feed the shrink guard stale counts.
   newest=prior(100,created='2021-01-01T00:00:00Z');newest['generated_at']='2026-10-28T00:00:00Z';older=prior(300);older['generated_at']='2026-10-20T00:00:00Z'
   with tempfile.TemporaryDirectory() as tmp:
-   site=checkout(tmp,('data.1111111111111111.json',older),('data.2222222222222222.json',newest),('data.json',older));out=pathlib.Path(tmp)/'output'
-   with patch.object(w.time,'sleep',lambda s:None):result=w.stage_site(site,out,'refresh',client_factory=Provider(300).factory,created_dates=lambda data:{'requested':0},published=offline())
-   self.assertEqual(result['previous_published'],'checkout:data.2222222222222222.json');self.assertTrue(result['notes'][0].startswith('live site unreadable: URLError'))
+   site=checkout(tmp,('data.1111111111111111.json',older),('data.json',older));out=pathlib.Path(tmp)/'output'
+   with patch.object(w.time,'sleep',lambda s:None),self.assertRaisesRegex(ValueError,'previous publication unreadable from https://example.test/site/: URLError: .*; current site unchanged'):
+    w.stage_site(site,out,'refresh',client_factory=Provider(300).factory,created_dates=lambda data:{'requested':0},published=offline())
+   self.assertFalse(out.exists())
+   # Readable previous publication: its dates carry first, the checkout's older files only seed rows it does not hold.
+   pub=publish(tmp,newest)
+   with patch.object(w.time,'sleep',lambda s:None):result=w.stage_site(site,out,'refresh',client_factory=Provider(300).factory,created_dates=lambda data:{'requested':0},published=LocalSite(pub,label='artifact:run 7'))
+   self.assertEqual(result['previous_published'],'artifact:run 7')
    rows=w.read_current(out)['feeds'][0]['rows'];by_id={r['repo_id']:r['created_at'] for r in rows}
    self.assertEqual((by_id[1000],by_id[1099],by_id[1100],by_id[1299]),('2021-01-01T00:00:00Z','2021-01-01T00:00:00Z','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z'));self.assertEqual(len(rows),300)
-   with self.assertRaisesRegex(ValueError,'no previous data: live site unreadable'):w.stage_site(checkout(tmp,name='empty'),pathlib.Path(tmp)/'none','refresh',client_factory=Provider(300).factory,published=offline())
  def test_refresh_carries_cached_metadata_from_the_published_snapshot(self):
   with tempfile.TemporaryDirectory() as tmp:
    site=checkout(tmp);pub=publish(tmp,current());out=pathlib.Path(tmp)/'output';served=live(pub)

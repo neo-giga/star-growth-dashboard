@@ -1,14 +1,20 @@
-"""The previously published dashboard state: the live GitHub Pages site first, the checkout's newest data file as fallback.
+"""The previously published dashboard state: the Pages artifact of this workflow's newest successful run.
 
-Nothing here writes to the live site or the checkout. Generated data is no longer committed to git, so the live site
-(index.html, the app it references, the per-window data files the app references, api/v1/catalog.json and the one
-snapshot it points to) is the only complete record of what was last published.
+Nothing here writes to the live site or the checkout. Generated data is no longer committed to git, and the Pages CDN may
+answer stale or not at all, so the durable record of what is currently published is the `github-pages` artifact the last
+successful run deployed (retained 30 days). A site tree (index.html, the app it references, the per-window data files the
+app references, api/v1/catalog.json and the one snapshot it points to) is read from that artifact, from an extracted copy
+on disk, or, only on explicit request, from the live site.
 """
 from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
+import tarfile
+import urllib.error
 import urllib.request
+import zipfile
 from pathlib import Path
 
 LIVE_SITE = 'https://neo-giga.github.io/star-growth-dashboard/'
@@ -17,6 +23,10 @@ MAX_BYTES = 64 * 1024 * 1024
 USER_AGENT = 'star-growth-dashboard (+https://github.com/neo-giga/star-growth-dashboard)'
 PATH = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*')
 DATA_FILE = re.compile(r'data(?:-(day|week|month))?(?:\.[0-9a-f]+)?\.json')
+API_URL = 'https://api.github.com'
+WORKFLOW = 'weekly-refresh.yml'
+PAGES_ARTIFACT = 'github-pages'
+MAX_ARTIFACT_BYTES = 1024 ** 3  # GitHub Pages' published-site limit
 
 
 def fetch_bytes(url):
@@ -52,9 +62,10 @@ class LiveSite:
 
 
 class LocalSite:
-    """Reads files of a site tree on disk (a checkout or a staged artifact); never follows symlinks."""
-    def __init__(self, root):
+    """Reads files of a site tree on disk (a checkout, a staged or a downloaded artifact); never follows symlinks."""
+    def __init__(self, root, label=None):
         self.root = Path(root).resolve()
+        self.label = label
 
     def read(self, relative):
         path = self.root / safe_path(relative)
@@ -63,7 +74,76 @@ class LocalSite:
         return path.read_bytes()
 
     def __str__(self):
-        return str(self.root)
+        return self.label or str(self.root)
+
+
+class _KeepRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def _github(url, token):
+    return urllib.request.Request(url, headers={'Authorization': f'Bearer {token}', 'Accept': 'application/vnd.github+json',
+                                                'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': USER_AGENT})
+
+
+def github_json(url, token):
+    with urllib.request.urlopen(_github(url, token), timeout=60) as response:
+        return json.loads(response.read(MAX_BYTES))
+
+
+def download_artifact(url, token, path):
+    """Stream an artifact zip to path. GitHub answers with a redirect to a pre-signed storage URL, which is fetched without the token."""
+    try:
+        response = urllib.request.build_opener(_KeepRedirect).open(_github(url, token), timeout=120)
+    except urllib.error.HTTPError as exc:
+        location = exc.headers.get('Location')
+        exc.close()
+        if exc.code not in (301, 302, 303, 307, 308) or not location:
+            raise
+        response = urllib.request.urlopen(urllib.request.Request(location, headers={'User-Agent': USER_AGENT}), timeout=120)
+    with response, open(path, 'wb') as out:
+        copied = 0
+        while chunk := response.read(1 << 20):
+            copied += len(chunk)
+            if copied > MAX_ARTIFACT_BYTES:
+                raise ValueError('publication artifact exceeds 1 GiB bound')
+            out.write(chunk)
+
+
+def extract_pages_artifact(zip_path, target):
+    """Unpack a downloaded `github-pages` artifact (a zip holding artifact.tar) into target; members may not leave target."""
+    tar_path = Path(zip_path).with_name('artifact.tar')
+    with zipfile.ZipFile(zip_path) as archive:
+        info = archive.getinfo('artifact.tar')
+        if info.file_size > MAX_ARTIFACT_BYTES:
+            raise ValueError('publication artifact exceeds 1 GiB bound')
+        with archive.open(info) as source, open(tar_path, 'wb') as out:
+            shutil.copyfileobj(source, out)
+    Path(target).mkdir(parents=True)
+    with tarfile.open(tar_path) as tar:
+        tar.extractall(target, filter='data')
+    tar_path.unlink()
+
+
+def latest_publication(repo, token, dest, api=API_URL):
+    """The site this workflow's newest successful run on main deployed, downloaded from its `github-pages` artifact into dest.
+    Raises when that run's artifact cannot be read: an older run's artifact is never used, it would roll the site back."""
+    runs = github_json(f'{api}/repos/{repo}/actions/workflows/{WORKFLOW}/runs?status=success&branch=main&per_page=20', token)['workflow_runs']
+    if not runs:
+        raise ValueError(f'no successful {WORKFLOW} run on main')
+    run = max(runs, key=lambda r: r.get('run_started_at') or r['created_at'])  # a re-run attempt deploys at its own start time
+    listed = github_json(f'{api}/repos/{repo}/actions/runs/{run["id"]}/artifacts?name={PAGES_ARTIFACT}&per_page=100', token)['artifacts']
+    usable = [a for a in listed if a.get('name') == PAGES_ARTIFACT and not a.get('expired')]
+    if not usable:
+        raise ValueError(f'newest successful run {run["id"]} has no unexpired {PAGES_ARTIFACT} artifact')
+    artifact = max(usable, key=lambda a: a.get('created_at') or '')
+    dest = Path(dest)
+    dest.mkdir(parents=True, exist_ok=True)
+    download_artifact(artifact['archive_download_url'], token, dest / 'artifact.zip')
+    extract_pages_artifact(dest / 'artifact.zip', dest / 'site')
+    (dest / 'artifact.zip').unlink()
+    return LocalSite(dest / 'site', label=f'artifact:run {run["id"]} ({run.get("event")}, {str(run.get("head_sha"))[:7]}, started {run.get("run_started_at")})')
 
 
 def validate_dashboard(data):

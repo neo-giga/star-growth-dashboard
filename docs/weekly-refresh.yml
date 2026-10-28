@@ -2,14 +2,15 @@
 # Approved job-scoped permissions for the public dashboard repository only.
 # Install as .github/workflows/weekly-refresh.yml in the public dashboard repository.
 # Official artifact deployment is explicit; nothing is committed to git: the site is rebuilt as the Pages artifact
-# from the repository's UI sources plus the run's staged data, and the previous state is read from the live site.
+# from the repository's UI sources plus the run's staged data, and the previous state is read from the github-pages
+# artifact of this workflow's newest successful run (retained 30 days), never from the Pages CDN.
 name: Daily public feed refresh
 on:
   schedule:
     - cron: '23 7 * * *'
   push:
     branches: [main]
-    # A merged UI/source change re-publishes the live data with the new UI (validate-current); no new data is read.
+    # A merged UI/source change re-publishes the last published data with the new UI (validate-current); no new data is read.
     paths:
       - index.html
       - app.js
@@ -22,7 +23,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'refresh retrieves new feeds; validate-current re-publishes the live data with the current UI'
+        description: 'refresh retrieves new feeds; validate-current re-publishes the last published data with the current UI'
         type: choice
         options: [refresh, validate-current]
         default: validate-current
@@ -42,6 +43,10 @@ on:
         description: 'Legacy alias for depth=N verify_top=N; 0 reads the whole feed under the strict rule; empty uses depth/verify_top'
         type: string
         default: ''
+      bootstrap_from_live:
+        description: 'One-time: when no successful run has a readable github-pages artifact, read the previous publication from the live site'
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -55,6 +60,7 @@ jobs:
     # Neo approved this narrow publication bundle; no personal token is required and nothing writes to the repository.
     permissions:
       contents: read
+      actions: read
       pages: write
       id-token: write
     environment:
@@ -75,9 +81,10 @@ jobs:
           DEPTH: ${{ inputs.depth || 'all' }}
           VERIFY_TOP: ${{ inputs.verify_top || '2000' }}
           TOP: ${{ inputs.top }}
+          BOOTSTRAP: ${{ inputs.bootstrap_from_live && '--bootstrap-from-live' || '' }}
         run: |
           python3 scripts/weekly_refresh.py --site-dir . --output-dir "$RUNNER_TEMP/site" \
-            --mode "$MODE" --max-pages "$MAX_PAGES" --depth "$DEPTH" --verify-top "$VERIFY_TOP" ${TOP:+--top "$TOP"} \
+            --mode "$MODE" --max-pages "$MAX_PAGES" --depth "$DEPTH" --verify-top "$VERIFY_TOP" ${TOP:+--top "$TOP"} $BOOTSTRAP \
             --checkpoint-dir "$RUNNER_TEMP/checkpoints" --diagnostic "$RUNNER_TEMP/refresh-diagnostic.json"
       - name: Preserve diagnostic and public page checkpoints
         if: always()
@@ -101,6 +108,8 @@ jobs:
         uses: actions/upload-pages-artifact@v3
         with:
           path: ${{ runner.temp }}/site
+          # The durable record of what is published: the next run reads it back for carry-over and re-release.
+          retention-days: 30
       - name: Deploy exact artifact
         id: deployment
         uses: actions/deploy-pages@v4
