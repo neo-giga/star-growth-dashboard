@@ -73,23 +73,14 @@ provider-ID/name matches may retain cached metadata with its original observed
 published workflow and its successful run before assuming automatic refresh is
 active; this document alone is not proof that a schedule has run.
 
-## Installation status / GitHub authorization blocker
+## Installation status
 
-The weekly workflow is **not installed or scheduled**. Existing OAuth access cannot
-create `.github/workflows/weekly-refresh.yml` because it lacks GitHub's `workflow`
-scope. Credentials/scopes were not changed; manual Pages publication remains active.
-Local unit and staging tests passed, but no hosted refresh/deploy workflow has run.
-
-A repository owner can install the [prepared workflow](weekly-refresh.yml): open the
-public repository on GitHub, choose Add file → Create new file, name it
-`.github/workflows/weekly-refresh.yml`, paste the template, and commit to main. Then
-Settings → Pages → Build and deployment → Source: GitHub Actions. The approved job
-permissions are contents:write, pages:write and id-token:write only for this public
-repository. Do not add a long-lived token or expose the private tracker.
-
-First run Actions → Weekly public feed refresh → Run workflow → validate-current.
-That tests staging/publication without inventing a fresh retrieval. After success,
-run refresh with the normal page bound and monitor all three periods to completion.
+The weekly workflow is installed at `.github/workflows/weekly-refresh.yml` (a copy of
+[the template](weekly-refresh.yml)) and runs Mondays 07:23 UTC; Pages source is GitHub Actions.
+Its job permissions are contents:write, pages:write and id-token:write for this public
+repository only; it uses the job's GITHUB_TOKEN, no long-lived token.
+Actions → Weekly public feed refresh → Run workflow runs it on demand (validate-current
+re-publishes the current data; refresh retrieves new feeds).
 The schedule is Monday 07:23 UTC only after installation. If any pagination or
 count check fails, do not publish the partial refresh or advance the catalog.
 
