@@ -29,6 +29,19 @@ class WeeklyRefreshTests(unittest.TestCase):
    site=self.fixture(tmp);out=pathlib.Path(tmp)/'output';before=(site/'data.json').read_bytes()
    result=w.stage_site(site,out,'validate-current',client_factory=lambda **kw:self.fail('network'),export_builder=self.builder)
    self.assertFalse(result['new_retrieval']);self.assertEqual((site/'data.json').read_bytes(),before);data,_=w.read_current(out);self.assertEqual([f['fetched_at_end'] for f in data['feeds']],[f['fetched_at_end'] for f in current()['feeds']]);self.assertEqual([f['rows'][0]['stars'] for f in data['feeds']],[100,100,100]);self.assertFalse((out/'private-note.txt').exists())
+ def test_refresh_fills_missing_creation_dates_before_publishing(self):
+  def fill(data):
+   for f in data['feeds']:
+    for r in f['rows']:
+     if r['created_at'] is None: r['created_at']='2024-01-02T03:04:05+00:00';r['created_at_github_repo_id']=7
+   return {'requested':3,'filled':3,'batches':1,'failed_batches':0,'errors':[]}
+  with tempfile.TemporaryDirectory() as tmp:
+   site=self.fixture(tmp);out=pathlib.Path(tmp)/'output'
+   result=w.stage_site(site,out,'refresh',client_factory=factory(name='new/r'),export_builder=self.builder,created_dates=fill)
+   self.assertEqual(result['created_dates']['filled'],3);data,_=w.read_current(out)
+   self.assertEqual([f['rows'][0]['created_at'] for f in data['feeds']],['2024-01-02T03:04:05+00:00']*3)
+   result=w.stage_site(site,pathlib.Path(tmp)/'validated','validate-current',export_builder=self.builder,created_dates=lambda data:self.fail('network'))
+   self.assertIsNone(result['created_dates'])
  def test_partial_inconsistent_failure_does_not_touch_last_good(self):
   for status in ('partial','inconsistent'):
    with tempfile.TemporaryDirectory() as tmp:
