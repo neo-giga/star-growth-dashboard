@@ -98,12 +98,10 @@ jobs:
           if-no-files-found: ignore
       - name: Refuse to deploy a stale run
         run: |
-          # Deploy only what live main holds: a stale re-run must never roll Pages back to an older UI.
-          live="$(git ls-remote origin refs/heads/main | cut -f1)"
-          if [ "$live" != "$(git rev-parse HEAD)" ]; then
-            echo "main is at $live, not this run's $(git rev-parse HEAD); dispatch a new run" >&2
-            exit 1
-          fi
+          # Deploy only when live main's UI/scripts/workflow (the push trigger's paths, scripts/deploy_paths.py) match this run's:
+          # a stale run must never roll Pages back to an older UI, and a newer tests/docs-only commit must not strand this one.
+          git fetch --no-tags --depth=1 origin refs/heads/main
+          python3 scripts/deploy_paths.py HEAD FETCH_HEAD
       - name: Upload exact staged Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
