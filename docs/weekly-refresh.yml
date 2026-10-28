@@ -1,15 +1,28 @@
 # INSTALLED at .github/workflows/weekly-refresh.yml (keep this copy identical); Pages source: GitHub Actions.
 # Approved job-scoped permissions for the public dashboard repository only.
 # Install as .github/workflows/weekly-refresh.yml in the public dashboard repository.
-# Official artifact deployment is explicit; GITHUB_TOKEN pushes alone do not trigger Pages.
+# Official artifact deployment is explicit; nothing is committed to git: the site is rebuilt as the Pages artifact
+# from the repository's UI sources plus the run's staged data, and the previous state is read from the live site.
 name: Daily public feed refresh
 on:
   schedule:
     - cron: '23 7 * * *'
+  push:
+    branches: [main]
+    # A merged UI/source change re-publishes the live data with the new UI (validate-current); no new data is read.
+    paths:
+      - index.html
+      - app.js
+      - style.css
+      - llms.txt
+      - docs/agent-feed.md
+      - scripts/**
+      - trending/**
+      - .github/workflows/weekly-refresh.yml
   workflow_dispatch:
     inputs:
       mode:
-        description: 'refresh retrieves new feeds; validate-current tests exports/deployment without new data'
+        description: 'refresh retrieves new feeds; validate-current re-publishes the live data with the current UI'
         type: choice
         options: [refresh, validate-current]
         default: validate-current
@@ -17,10 +30,18 @@ on:
         description: 'Per-period safety bound; a reached bound never publishes partial data'
         type: string
         default: '1000'
-      top:
-        description: 'Rows per period (multiple of 100, 100..10000); 0 reads the whole feed under the strict rule'
+      depth:
+        description: 'Rows per period: all (whole feed) or a multiple of 100 (bounded, read twice)'
+        type: string
+        default: 'all'
+      verify_top:
+        description: 'Rows per period read twice and published only when both reads agree (multiple of 100, 100..10000)'
         type: string
         default: '2000'
+      top:
+        description: 'Legacy alias for depth=N verify_top=N; 0 reads the whole feed under the strict rule; empty uses depth/verify_top'
+        type: string
+        default: ''
 permissions:
   contents: read
 concurrency:
@@ -30,10 +51,10 @@ jobs:
   refresh-and-publish:
     if: github.repository == 'neo-giga/star-growth-dashboard' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 330
-    # Neo approved this narrow publication bundle; no personal token is required.
+    timeout-minutes: 360
+    # Neo approved this narrow publication bundle; no personal token is required and nothing writes to the repository.
     permissions:
-      contents: write
+      contents: read
       pages: write
       id-token: write
     environment:
@@ -49,12 +70,14 @@ jobs:
       - name: Stage validated site without changing current files
         env:
           GH_TOKEN: ${{ github.token }}
-          MODE: ${{ inputs.mode || 'refresh' }}
+          MODE: ${{ inputs.mode || (github.event_name == 'push' && 'validate-current') || 'refresh' }}
           MAX_PAGES: ${{ inputs.max_pages || '1000' }}
+          DEPTH: ${{ inputs.depth || 'all' }}
+          VERIFY_TOP: ${{ inputs.verify_top || '2000' }}
           TOP: ${{ inputs.top }}
         run: |
           python3 scripts/weekly_refresh.py --site-dir . --output-dir "$RUNNER_TEMP/site" \
-            --mode "$MODE" --max-pages "$MAX_PAGES" --top "${TOP:-2000}" \
+            --mode "$MODE" --max-pages "$MAX_PAGES" --depth "$DEPTH" --verify-top "$VERIFY_TOP" ${TOP:+--top "$TOP"} \
             --checkpoint-dir "$RUNNER_TEMP/checkpoints" --diagnostic "$RUNNER_TEMP/refresh-diagnostic.json"
       - name: Preserve diagnostic and public page checkpoints
         if: always()
@@ -66,22 +89,9 @@ jobs:
             ${{ runner.temp }}/checkpoints
           retention-days: 7
           if-no-files-found: ignore
-      - name: Persist immutable snapshots and current pointer
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Refuse to deploy a stale run
         run: |
-          # Only validated allowlisted site output is copied. No deletions of old snapshots/assets.
-          cp -a "$RUNNER_TEMP/site/." .
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add index.html .nojekyll llms.txt api docs/agent-feed.md
-          git add -- 'app.*.js' 'style.*.css' 'data.*.json'
-          if ! git diff --cached --quiet; then
-            git commit -m 'Refresh validated public repository feed'
-            # No force push: a concurrent outside writer fails safely instead of overwriting.
-            git -c credential.helper='!gh auth git-credential' push origin HEAD:main
-          fi
-          # Deploy only what live main holds: a stale re-run must never roll Pages back.
+          # Deploy only what live main holds: a stale re-run must never roll Pages back to an older UI.
           live="$(git ls-remote origin refs/heads/main | cut -f1)"
           if [ "$live" != "$(git rev-parse HEAD)" ]; then
             echo "main is at $live, not this run's $(git rev-parse HEAD); dispatch a new run" >&2

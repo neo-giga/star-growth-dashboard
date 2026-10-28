@@ -25,10 +25,10 @@ immutable; catalog is the current pointer. Store snapshot ID with every result.
   selected-window gain. It is not independently reconstructed historical net
   growth. Exact window endpoints and provider `source_as_of` are **null**.
 - `provenance.fetched_at` and `source_url` refer to the actual provider page when
-  retained. Weekly cached pages preserve individual retrieval timestamps. Older
-  bounded daily/monthly samples did not retain per-row page mappings: those are
-  null, with the original feed retrieval span retained. Never substitute export
-  time, repository creation date or download time for source freshness.
+  retained. Rows carry the retrieval timestamp of the pass that published them (the
+  head's later pass). Older bounded daily/monthly samples did not retain per-row page
+  mappings: those are null, with the original feed retrieval span retained. Never
+  substitute export time, repository creation date or download time for source freshness.
 - `metadata.created_at` is cached GitHub repository creation time, not GitTrend's
   provider-record `createdAt`. Other cached GitHub metadata has its own source
   and observed time, independent of star observations.
@@ -53,12 +53,20 @@ would need explicit endpoints, pagination, timestamps and rate budgets; no
 
 ## Coverage and rights
 
-Each period holds GitTrend's **top 2,000 rows by provider rank** (20 pages of 100,
-`coverage.bounded_top`), read daily. The provider total moves between pages and is
-kept in `coverage.warnings`, so `coverage.status` is `partial` or `inconsistent` by
-design: a bounded sample, not an atomic snapshot. Repositories outside the top 2,000
-of a window are not listed. Richer metadata does not improve those limits. Missing
-from this feed does not mean deleted from GitHub.
+The explorer page publishes every row GitTrend lists for a window (about 12,000 for the
+day, 33,000 for the week and 67,000 for the month). This agent feed holds only each
+window's **verified head**: the top `coverage.verified_top` rows by provider rank
+(default 2,000, `coverage.verified_rows` actually exported), the rows that were read
+twice and agreed. The once-read tail is on the page's per-window data files
+(`data-day.*.json`, `data-week.*.json`, `data-month.*.json`, referenced by the app) and
+described in `coverage.tail` (pages, rows, duplicates, total drift); `coverage.unique_repos`
+is the whole published window. Repositories outside the verified head are not listed
+here. Richer metadata does not improve those limits. Missing from this feed does not
+mean deleted from GitHub.
+
+Only the **latest** snapshot is served. Snapshot URLs stay content-addressed and the
+catalog is the current pointer, but an older snapshot's URLs stop resolving once the
+next publication deploys: store the rows you depend on, not only the snapshot ID.
 
 [GitTrend methodology](https://gittrend.io/methodology) advertises rankings and
 aggregate data as CC0. Repository metadata retains its respective owners' rights;
@@ -67,34 +75,47 @@ No gitpulse dataset is redistributed.
 
 ## Refresh behavior
 
-The daily pipeline validates pagination, duplicates, counts and provenance
-before publication: every requested page full except a genuine last page, no
-duplicate provider IDs, min(top, provider total) rows, and no period shrinking
-below half of min(top, previous rows). Because a rank shift between two page
-reads can skip a repository while every page stays full, each period is read
-twice, 910 s apart (past the provider's advertised cache window: s-maxage 300 s
-plus stale-while-revalidate 600 s, so a cache cannot replay the first read),
-and publishes the later pass only when both have the identical ordered ID list
-(`coverage.verified_passes`); a period whose passes differ is read a third time
-after another 910 s and must match the second. Otherwise the previous public catalog stays unchanged. A
-`top=0` run applies the strict whole-feed rule instead. Metadata is not bulk-refetched: unchanged
-provider-ID/name matches may retain cached metadata with its original observed
- time. A validation/redeployment run is not a new data retrieval. Consult the
-published workflow and its successful run before assuming automatic refresh is
-active; this document alone is not proof that a schedule has run.
+The daily pipeline reads each window in two tiers. The head (the first
+`verify_top` rows, 20 pages of 100) keeps the earlier guarantee: every requested page
+full except a genuine last page, no duplicate provider IDs, and, because a rank shift
+between two page reads can skip a repository while every page stays full, it is read
+twice, 910 s apart (past the provider's advertised cache window: s-maxage 300 s plus
+stale-while-revalidate 600 s, so a cache cannot replay the first read), and publishes
+the later pass only when both have the identical ordered ID list
+(`coverage.verified_passes`); a window whose passes differ is read a third time after
+another 910 s and must match the second. The tail (every later page until the provider
+reports no more) is read once in the first pass: duplicate IDs keep their best rank, the
+provider total may move (recorded in `coverage.tail.total_drift` and the warnings), and
+the window publishes only when the tail reached the provider's end without a fetch
+failure and the unique head+tail rows cover at least 98% of the smaller of the first and
+last reported totals. A window that shrinks below half of its previously published row
+count is refused. Otherwise the previous publication stays unchanged. `depth=N` reads a
+bounded N rows twice (the earlier behaviour); `top=0` applies the strict whole-feed rule.
+Metadata is not bulk-refetched: unchanged provider-ID/name matches may retain cached
+metadata with its original observed time, read back from the live snapshot at the start
+of the run. GitHub creation dates are carried from the previous publication and filled
+for at most 900 batched GraphQL queries per run; the rest fill on later days. A
+validation/redeployment run is not a new data retrieval: it re-releases the live data and
+snapshot with the current UI. Consult the published workflow and its successful run
+before assuming automatic refresh is active; this document alone is not proof that a
+schedule has run.
 
 ## Installation status
 
 The daily workflow is installed at `.github/workflows/weekly-refresh.yml` (a copy of
 [the template](weekly-refresh.yml); the file name is kept for its run history) and runs
-daily at 07:23 UTC; Pages source is GitHub Actions.
-Its job permissions are contents:write, pages:write and id-token:write for this public
+daily at 07:23 UTC; Pages source is GitHub Actions. Nothing is committed to git: each run
+builds the whole site as the Pages artifact from the repository's UI sources plus the
+run's staged data, and reads the previous publication from the live site.
+Its job permissions are contents:read, pages:write and id-token:write for this public
 repository only; it uses the job's GITHUB_TOKEN, no long-lived token.
-Actions → Daily public feed refresh → Run workflow runs it on demand (validate-current
-re-publishes the current data; refresh retrieves new feeds; `top` sets rows per period,
-default 2000, 0 for the strict whole feed).
-The schedule is daily 07:23 UTC. If any pagination or
-count check fails, do not publish the partial refresh or advance the catalog.
+A push to `main` that changes the UI or source files re-publishes the live data with the
+new UI (validate-current) automatically. Actions → Daily public feed refresh → Run
+workflow runs it on demand (validate-current re-publishes the live data; refresh
+retrieves new feeds; `depth` is all or a bounded multiple of 100, `verify_top` the rows
+read twice, default 2000; `top` is the legacy alias, 0 for the strict whole feed).
+The schedule is daily 07:23 UTC. If any pagination, agreement or coverage check fails,
+the partial refresh is not published and the catalog does not advance.
 
 Official setup references: [Pages publishing source](https://docs.github.com/en/pages/getting-started-with-github-pages/configuring-a-publishing-source-for-your-github-pages-site),
 [manual workflow runs](https://docs.github.com/en/actions/how-tos/manage-workflow-runs),
