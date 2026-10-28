@@ -106,12 +106,15 @@ The daily workflow is installed at `.github/workflows/weekly-refresh.yml` (a cop
 [the template](weekly-refresh.yml); the file name is kept for its run history) and runs
 daily at 07:23 UTC; Pages source is GitHub Actions. Nothing is committed to git: each run
 builds the whole site as the Pages artifact from the repository's UI sources plus the
-run's staged data, and reads the previous publication from the live site.
-Its job permissions are contents:read, pages:write and id-token:write for this public
+run's staged data, and reads the previous publication from the `github-pages` artifact of
+the newest successful run (kept 30 days), never from the live site; with no readable
+artifact it fails and the current site stays (`bootstrap_from_live` reads the live site once).
+Its job permissions are contents:read, actions:read, pages:write and id-token:write for this public
 repository only; it uses the job's GITHUB_TOKEN, no long-lived token.
-A push to `main` that changes the UI or source files re-publishes the live data with the
-new UI (validate-current) automatically. Actions → Daily public feed refresh → Run
-workflow runs it on demand (validate-current re-publishes the live data; refresh
+A push to `main` that changes the UI or source files re-publishes the last published data with the
+new UI (validate-current) automatically; a run deploys only while its UI/script sources
+still match live `main`'s. Actions → Daily public feed refresh → Run
+workflow runs it on demand (validate-current re-publishes the last published data; refresh
 retrieves new feeds; `depth` is all or a bounded multiple of 100, `verify_top` the rows
 read twice, default 2000; `top` is the legacy alias, 0 for the strict whole feed).
 The schedule is daily 07:23 UTC. If any pagination, agreement or coverage check fails,
