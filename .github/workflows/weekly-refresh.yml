@@ -31,10 +31,18 @@ on:
         description: 'Per-period safety bound; a reached bound never publishes partial data'
         type: string
         default: '1000'
-      depth:
-        description: 'Rows per period: all (whole feed) or a multiple of 100 (bounded, read twice)'
+      day_depth:
+        description: 'Day rows: all (whole feed) or a multiple of 100'
         type: string
         default: 'all'
+      week_depth:
+        description: 'Week rows: all (whole feed) or a multiple of 100'
+        type: string
+        default: 'all'
+      month_depth:
+        description: 'Month rows: all (~676 pages; fits the 6 h job only on a fast provider day) or a multiple of 100'
+        type: string
+        default: '20000'
       verify_top:
         description: 'Rows per period read twice and published only when both reads agree (multiple of 100, 100..10000)'
         type: string
@@ -78,14 +86,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           MODE: ${{ inputs.mode || (github.event_name == 'push' && 'validate-current') || 'refresh' }}
           MAX_PAGES: ${{ inputs.max_pages || '1000' }}
-          DEPTH: ${{ inputs.depth || 'all' }}
+          DEPTH: day=${{ inputs.day_depth || 'all' }},week=${{ inputs.week_depth || 'all' }},month=${{ inputs.month_depth || '20000' }}
           VERIFY_TOP: ${{ inputs.verify_top || '2000' }}
           TOP: ${{ inputs.top }}
           BOOTSTRAP: ${{ inputs.bootstrap_from_live && '--bootstrap-from-live' || '' }}
         run: |
           python3 scripts/weekly_refresh.py --site-dir . --output-dir "$RUNNER_TEMP/site" \
             --mode "$MODE" --max-pages "$MAX_PAGES" --depth "$DEPTH" --verify-top "$VERIFY_TOP" ${TOP:+--top "$TOP"} $BOOTSTRAP \
-            --checkpoint-dir "$RUNNER_TEMP/checkpoints" --diagnostic "$RUNNER_TEMP/refresh-diagnostic.json"
+            --deadline-minutes 330 --checkpoint-dir "$RUNNER_TEMP/checkpoints" --diagnostic "$RUNNER_TEMP/refresh-diagnostic.json"
       - name: Preserve diagnostic and public page checkpoints
         if: always()
         uses: actions/upload-artifact@v4

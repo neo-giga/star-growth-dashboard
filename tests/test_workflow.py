@@ -48,6 +48,10 @@ class WorkflowTests(unittest.TestCase):
  def test_depth_and_verify_top_reach_the_script_and_the_run_may_take_six_hours(self):
   self.assertIn('timeout-minutes: 360',WORKFLOW)
   self.assertIn('--depth "$DEPTH" --verify-top "$VERIFY_TOP" ${TOP:+--top "$TOP"}',WORKFLOW)
-  self.assertIn("DEPTH: ${{ inputs.depth || 'all' }}",WORKFLOW);self.assertIn("VERIFY_TOP: ${{ inputs.verify_top || '2000' }}",WORKFLOW)
+  self.assertIn("DEPTH: day=${{ inputs.day_depth || 'all' }},week=${{ inputs.week_depth || 'all' }},month=${{ inputs.month_depth || '20000' }}",WORKFLOW)
+  for name,default in (('day_depth','all'),('week_depth','all'),('month_depth','20000')):self.assertRegex(WORKFLOW,rf"      {name}:\n        description: .*\n        type: string\n        default: '{default}'\n")
+  self.assertNotRegex(WORKFLOW,r'\n      depth:\n')
+  self.assertIn('--deadline-minutes 330',WORKFLOW)  # 30 min under timeout-minutes: 360 for the date fill and the deploy
+  self.assertIn("VERIFY_TOP: ${{ inputs.verify_top || '2000' }}",WORKFLOW)
   self.assertRegex(WORKFLOW,r"      top:\n        description: .*\n        type: string\n        default: ''\n")  # legacy top input is empty by default
   self.assertIn('python3 -m unittest discover -s tests',WORKFLOW)

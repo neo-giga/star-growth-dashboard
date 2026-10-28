@@ -83,14 +83,20 @@ twice, 910 s apart (past the provider's advertised cache window: s-maxage 300 s 
 stale-while-revalidate 600 s, so a cache cannot replay the first read), and publishes
 the later pass only when both have the identical ordered ID list
 (`coverage.verified_passes`); a window whose passes differ is read a third time after
-another 910 s and must match the second. The tail (every later page until the provider
-reports no more) is read once in the first pass: duplicate IDs keep their best rank, the
+another 910 s and must match the second. All heads are read and verified first; then
+each window's tail (every later page up to its depth: the whole day and week lists and
+20,000 month rows by default) is read once: duplicate IDs keep their best rank, the
 provider total may move (recorded in `coverage.tail.total_drift` and the warnings), and
-the window publishes only when the tail reached the provider's end without a fetch
-failure and the unique head+tail rows cover at least 98% of the smaller of the first and
-last reported totals. A window that shrinks below half of its previously published row
-count is refused. Otherwise the previous publication stays unchanged. `depth=N` reads a
-bounded N rows twice (the earlier behaviour); `top=0` applies the strict whole-feed rule.
+the window publishes only when the tail reached the provider's end (or its depth) without a
+fetch failure and the unique head+tail rows cover at least 98% of the smaller of the first
+and last reported totals (or the depth). A page read is retried up to six times on
+429/5xx/timeouts (5, 15, 30, 60, 120 s apart); a tail page that still fails is read once
+more after the window's last page. The first window that fails stops the run, and a run
+that would pass its time budget stops before the next read. A window that shrinks below half of its
+previously published row count is refused. Otherwise the previous publication stays
+unchanged. `coverage.reads` records each pass's pages, seconds, retries and re-queued pages.
+`top=N` reads a bounded N rows twice per window (the earlier behaviour); `top=0` applies
+the strict whole-feed rule.
 Metadata is not bulk-refetched: unchanged provider-ID/name matches may retain cached
 metadata with its original observed time, read back from the live snapshot at the start
 of the run. GitHub creation dates are carried from the previous publication and filled
@@ -115,7 +121,8 @@ A push to `main` that changes the UI or source files re-publishes the last publi
 new UI (validate-current) automatically; a run deploys only while its UI/script sources
 still match live `main`'s. Actions → Daily public feed refresh → Run
 workflow runs it on demand (validate-current re-publishes the last published data; refresh
-retrieves new feeds; `depth` is all or a bounded multiple of 100, `verify_top` the rows
+retrieves new feeds; `day_depth`, `week_depth`, `month_depth` are all or a multiple of 100,
+default all, all, 20000; `verify_top` the rows
 read twice, default 2000; `top` is the legacy alias, 0 for the strict whole feed).
 The schedule is daily 07:23 UTC. If any pagination, agreement or coverage check fails,
 the partial refresh is not published and the catalog does not advance.
