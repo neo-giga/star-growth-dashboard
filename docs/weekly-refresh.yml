@@ -1,4 +1,4 @@
-# NOT INSTALLED: owner must add this at .github/workflows/weekly-refresh.yml and select Pages GitHub Actions.
+# INSTALLED at .github/workflows/weekly-refresh.yml (keep this copy identical); Pages source: GitHub Actions.
 # Approved job-scoped permissions for the public dashboard repository only.
 # Install as .github/workflows/weekly-refresh.yml in the public dashboard repository.
 # Official artifact deployment is explicit; GITHUB_TOKEN pushes alone do not trigger Pages.
@@ -24,7 +24,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   refresh-and-publish:
-    if: github.repository == 'neo-giga/star-growth-dashboard'
+    if: github.repository == 'neo-giga/star-growth-dashboard' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 330
     # Neo approved this narrow publication bundle; no personal token is required.
@@ -44,6 +44,7 @@ jobs:
         run: python3 -m unittest discover -s tests
       - name: Stage validated site without changing current files
         env:
+          GH_TOKEN: ${{ github.token }}
           MODE: ${{ inputs.mode || 'refresh' }}
           MAX_PAGES: ${{ inputs.max_pages || '1000' }}
         run: |
@@ -74,6 +75,12 @@ jobs:
             git commit -m 'Refresh validated public repository feed'
             # No force push: a concurrent outside writer fails safely instead of overwriting.
             git -c credential.helper='!gh auth git-credential' push origin HEAD:main
+          fi
+          # Deploy only what live main holds: a stale re-run must never roll Pages back.
+          live="$(git ls-remote origin refs/heads/main | cut -f1)"
+          if [ "$live" != "$(git rev-parse HEAD)" ]; then
+            echo "main is at $live, not this run's $(git rev-parse HEAD); dispatch a new run" >&2
+            exit 1
           fi
       - name: Upload exact staged Pages artifact
         uses: actions/upload-pages-artifact@v3
