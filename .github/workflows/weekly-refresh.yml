@@ -2,10 +2,10 @@
 # Approved job-scoped permissions for the public dashboard repository only.
 # Install as .github/workflows/weekly-refresh.yml in the public dashboard repository.
 # Official artifact deployment is explicit; GITHUB_TOKEN pushes alone do not trigger Pages.
-name: Weekly public feed refresh
+name: Daily public feed refresh
 on:
   schedule:
-    - cron: '23 7 * * 1'
+    - cron: '23 7 * * *'
   workflow_dispatch:
     inputs:
       mode:
@@ -17,6 +17,10 @@ on:
         description: 'Per-period safety bound; a reached bound never publishes partial data'
         type: string
         default: '1000'
+      top:
+        description: 'Rows per period (multiple of 100, 100..10000); 0 reads the whole feed under the strict rule'
+        type: string
+        default: '2000'
 permissions:
   contents: read
 concurrency:
@@ -47,9 +51,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           MODE: ${{ inputs.mode || 'refresh' }}
           MAX_PAGES: ${{ inputs.max_pages || '1000' }}
+          TOP: ${{ inputs.top }}
         run: |
           python3 scripts/weekly_refresh.py --site-dir . --output-dir "$RUNNER_TEMP/site" \
-            --mode "$MODE" --max-pages "$MAX_PAGES" \
+            --mode "$MODE" --max-pages "$MAX_PAGES" --top "${TOP:-2000}" \
             --checkpoint-dir "$RUNNER_TEMP/checkpoints" --diagnostic "$RUNNER_TEMP/refresh-diagnostic.json"
       - name: Preserve diagnostic and public page checkpoints
         if: always()
