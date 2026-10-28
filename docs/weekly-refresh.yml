@@ -82,6 +82,7 @@ jobs:
       - name: Unit checks (no network fixtures)
         run: python3 -m unittest discover -s tests
       - name: Stage validated site without changing current files
+        id: stage
         env:
           GH_TOKEN: ${{ github.token }}
           MODE: ${{ inputs.mode || (github.event_name == 'push' && 'validate-current') || 'refresh' }}
@@ -91,9 +92,15 @@ jobs:
           TOP: ${{ inputs.top }}
           BOOTSTRAP: ${{ inputs.bootstrap_from_live && '--bootstrap-from-live' || '' }}
         run: |
+          set +e
           python3 scripts/weekly_refresh.py --site-dir . --output-dir "$RUNNER_TEMP/site" \
             --mode "$MODE" --max-pages "$MAX_PAGES" --depth "$DEPTH" --verify-top "$VERIFY_TOP" ${TOP:+--top "$TOP"} $BOOTSTRAP \
             --deadline-minutes 330 --checkpoint-dir "$RUNNER_TEMP/checkpoints" --diagnostic "$RUNNER_TEMP/refresh-diagnostic.json"
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          # 0: every window refreshed. 3: staged with a window carried from the previous publication: deploy it, then fail the run
+          # (the owner is emailed). Anything else: nothing staged, the current site stays.
+          [ "$code" = 0 ] || [ "$code" = 3 ]
       - name: Preserve diagnostic and public page checkpoints
         if: always()
         uses: actions/upload-artifact@v4
@@ -119,3 +126,8 @@ jobs:
       - name: Deploy exact artifact
         id: deployment
         uses: actions/deploy-pages@v4
+      - name: Fail the run when a window kept its previous rows
+        if: steps.stage.outputs.code == '3'
+        run: |
+          echo "deployed, but a window kept its previous rows: see carried_windows in refresh-diagnostic-${{ github.run_id }}" >&2
+          exit 1

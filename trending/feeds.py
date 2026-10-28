@@ -148,10 +148,16 @@ def normalize(row):
 TRANSIENT = (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException)
 
 
-def collect_feed(client, period, limit=100, max_pages=1000, first_page=1, keep_first=False, requeue=False, before_page=None):
+CONSECUTIVE_FAILURES = 3
+
+
+def collect_feed(client, period, limit=100, max_pages=1000, first_page=1, keep_first=False, requeue=False, before_page=None,
+                 on_failed_page=None, clock=time.monotonic):
     """first_page > 1 reads a tail continuing an earlier read; keep_first keeps a duplicate ID's best-ranked row. requeue: a page
-    whose fetch still fails after the client's retries is read once more after the last page; a second failure is the failure.
-    before_page(period, page) runs before every page read and may raise to stop the read (a time budget)."""
+    whose fetch still fails after the client's retries is read once more after the last page; a second failure is the failure, and
+    CONSECUTIVE_FAILURES failed pages in a row end the read at once (a dead endpoint, not an isolated failure).
+    before_page(period, page) runs before every page read and may raise to stop the read (a time budget).
+    on_failed_page(seconds) is told how long each failed page read took (retries included) and returns a reason to stop, or None."""
     if period not in PERIODS.values() or not 1 <= limit <= 100 or max_pages < 1 or first_page < 1:
         raise ValueError('invalid period/limit/max_pages')
     started = utcnow()
@@ -199,27 +205,45 @@ def collect_feed(client, period, limit=100, max_pages=1000, first_page=1, keep_f
             raise ValueError('empty page claims more data')
         return has_more
 
+    def failed(started):
+        """A reason to stop after a failed page read (the window's failed-page time cap), or None."""
+        return on_failed_page(clock() - started) if on_failed_page else None
+
+    consecutive = 0
     for page in range(first_page, first_page + max_pages):
+        started_page = clock()
         try:
             if not read(page):
                 reached_end = True
                 break
+            consecutive = 0
         except TRANSIENT as exc:
             if not requeue:
                 # Preserve a clearly partial diagnostic result; never publish a complete cache on failure.
                 failure = f'{type(exc).__name__}: {str(exc)[:200]}'
+                failed(started_page)
                 break
             requeued.append(page)
+            consecutive += 1
+            stop = failed(started_page)
+            if consecutive >= CONSECUTIVE_FAILURES:
+                failure = f'{consecutive} consecutive pages failed (pages {page - consecutive + 1}-{page}): {type(exc).__name__}: {str(exc)[:200]}'
+            elif stop:
+                failure = f'{stop}: {type(exc).__name__}: {str(exc)[:200]}'
+            if failure:
+                break
         except ValueError as exc:
             failure = f'{type(exc).__name__}: {str(exc)[:200]}'
             break
     for page in requeued:
         if failure:
             break
+        started_page = clock()
         try:
             read(page)
         except (ValueError, *TRANSIENT) as exc:
             failure = f'page {page} failed again after re-queue: {type(exc).__name__}: {str(exc)[:200]}'
+            failed(started_page)
     rows, duplicates = {}, 0
     for page in sorted(page_rows):
         for row in page_rows[page]:

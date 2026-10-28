@@ -91,9 +91,13 @@ the window publishes only when the tail reached the provider's end (or its depth
 fetch failure and the unique head+tail rows cover at least 98% of the smaller of the first
 and last reported totals (or the depth). A page read is retried up to six times on
 429/5xx/timeouts (5, 15, 30, 60, 120 s apart); a tail page that still fails is read once
-more after the window's last page. The first window that fails stops the run, and a run
-that would pass its time budget stops before the next read. A window that shrinks below half of its
-previously published row count is refused. Otherwise the previous publication stays
+more after the window's last page; three failed pages in a row, a head page that fails all
+its retries, or 20 minutes spent on one window's failed pages end that window at once, and a
+run that would pass its time budget stops before the next read. A window that shrinks below
+half of its previously published row count is refused. Windows publish independently: a
+window that fails any check keeps its previously published rows and its own "Updated" time
+(`coverage.refreshed: false` with `not_refreshed_reason`), the others publish fresh, and the
+run is marked failed after deploying. When no window refreshes, the previous publication stays
 unchanged. `coverage.reads` records each pass's pages, seconds, retries and re-queued pages.
 `top=N` reads a bounded N rows twice per window (the earlier behaviour); `top=0` applies
 the strict whole-feed rule.

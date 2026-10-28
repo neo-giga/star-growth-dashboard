@@ -26,6 +26,9 @@ PERIODS = ('day', 'week', 'month')
 # Rows per window by default. The full week list (~33,500) is read; the full month list (~67,500, ~676 pages) is not: GitTrend served
 # month tail pages at 21-28 s (max 86 s) on 2026-10-28, ~4.5 h for the month alone against the 6 h job limit. month=all on a fast day.
 DEFAULT_DEPTH = {'day': 'all', 'week': 'all', 'month': 20000}
+# A window gives up once its failed page reads (retries included) add up to this. On 2026-10-28 every month request answered 503
+# after ~15.6 s for hours while week answered normally; re-queueing page after page would have run to the deadline.
+WINDOW_FAILURE_SECONDS = 20 * 60
 
 
 class BudgetExhausted(Exception):
@@ -124,7 +127,7 @@ def stability_problem(earlier, later, top):
 
 
 def read_period(client_factory, period, cache, max_pages, first_page=1, keep_first=False, budget=None, sleeper=None, label=None,
-                requeue=False):
+                requeue=False, on_failed_page=None):
     """One pass over a period's pages; result['read'] records the pass label, pages, seconds, retries and re-queued pages. Client
     retry waits go through sleeper and the budget."""
     budget = budget or Budget()
@@ -140,11 +143,11 @@ def read_period(client_factory, period, cache, max_pages, first_page=1, keep_fir
             last[0] = time.monotonic()
             return fetch(url)
         client.fetch = paced_fetch
-    started = time.monotonic()
+    started = budget.clock()
     result = collect_feed(client, period, max_pages=max_pages, first_page=first_page, keep_first=keep_first, requeue=requeue,
-                          before_page=budget.check)
+                          before_page=budget.check, on_failed_page=on_failed_page, clock=budget.clock)
     coverage = result['coverage'] if isinstance(result, dict) and isinstance(result.get('coverage'), dict) else {}
-    seconds = round(time.monotonic() - started, 1)
+    seconds = round(budget.clock() - started, 1)
     pages = coverage.get('pages_fetched', 0)
     result['read'] = {'pass': label, 'pages': pages, 'seconds': seconds, 'seconds_per_page': round(seconds / pages, 2) if pages else None,
                       'retries': coverage.get('retries', 0), 'requeued_pages': coverage.get('requeued_pages', []), 'failure': coverage.get('failure')}
@@ -220,11 +223,14 @@ def merge_two_tier(period, head, first_head, tail, depth, verify_top, tail_bound
 
 
 def collect_two_tier(client_factory, depth, verify_top, max_pages, checkpoint_dir, sleeper, budget=None):
-    """Heads first, tails last, failing fast. Pass A reads every window's head (min(verify_top, depth) rows) under bounded_problem;
-    after one RETRY_DELAY wait (past the provider's cache window) pass B re-reads the heads, and only windows whose A and B differ
-    get one more wait and a pass C, accepted when it agrees with B. Once every head is verified, each window's tail (every later
-    page up to its depth, or max_pages for all) is read once and merged. The first unpublishable window (pass A head failure where a
-    tail is due, a head unstable after C, a tail failure or shortfall) stops the run before any further provider request.
+    """({period: collected result}, {period: why not publishable}): windows succeed or fail independently.
+
+    Heads first, tails last. Pass A reads every window's head (min(verify_top, depth) rows) under bounded_problem; after one
+    RETRY_DELAY wait (past the provider's cache window) pass B re-reads the heads, and only windows whose A and B differ get one more
+    wait and a pass C, accepted when it agrees with B. Once the heads are verified, each window's tail (every later page up to its
+    depth, or max_pages for all) is read once and merged. A window stops being read the moment it is unpublishable: a head pass
+    whose page read failed (a dead endpoint answers page 1 with errors), a head unstable after C, a tail failure or shortfall, or
+    WINDOW_FAILURE_SECONDS spent on its failed pages; the other windows go on. The time budget stops every window not yet done.
     Reading the heads back to back keeps A and B minutes apart: with the tails in between (2026-10-28) a ranking update landed
     between them on every window. depth: {period: 'all' | rows}; depth == verify_top is today's bounded behaviour (no tail)."""
     wait = sleeper or time.sleep
@@ -232,40 +238,61 @@ def collect_two_tier(client_factory, depth, verify_top, max_pages, checkpoint_di
     head_pages = {p: min(verify_top, depth[p] if depth[p] != 'all' else verify_top) // 100 for p in PERIODS}
     bound = {p: max_pages if depth[p] == 'all' else depth[p] // 100 for p in PERIODS}
     heads, reads = {p: [] for p in PERIODS}, {p: [] for p in PERIODS}
+    collected, failed, failed_seconds = {}, {}, {p: 0.0 for p in PERIODS}
     cache = lambda period, suffix: pathlib.Path(checkpoint_dir) / (period + suffix) if checkpoint_dir else None
+    def capped(period):
+        def on_failed_page(seconds):
+            failed_seconds[period] += seconds
+            if failed_seconds[period] >= WINDOW_FAILURE_SECONDS:
+                return f'{failed_seconds[period]:.0f} s spent on failed pages (cap {WINDOW_FAILURE_SECONDS} s)'
+            return None
+        return on_failed_page
     def head(period, suffix, label):
-        run = read_period(client_factory, period, cache(period, suffix), head_pages[period], budget=budget, sleeper=wait, label=label)
+        run = read_period(client_factory, period, cache(period, suffix), head_pages[period], budget=budget, sleeper=wait, label=label,
+                          on_failed_page=capped(period))
         heads[period].append(run)
         reads[period].append(run['read'])
+        if run['coverage']['failure']:
+            failed[period] = f'{period} refresh not publishable: pass {label} head {run["coverage"]["failure"]}'
         return run
-    for period in PERIODS:
-        failure = head(period, '', 'A')['coverage']['failure']
-        if failure and (depth[period] == 'all' or bound[period] > head_pages[period]):
-            raise ValueError(f'{period} refresh not publishable: pass A head {failure}; current site unchanged')
-    budget.sleep(wait, RETRY_DELAY, 'the wait before pass B')
-    for period in PERIODS:
-        head(period, '-verify', 'B')
-    unstable = [period for period in PERIODS if stability_problem(*heads[period][-2:], head_pages[period] * 100)]
-    if unstable:
-        budget.sleep(wait, RETRY_DELAY, 'the wait before pass C')
-        for period in unstable:
-            head(period, '-retry', 'C')
-    for period in PERIODS:
-        problem = stability_problem(*heads[period][-2:], head_pages[period] * 100)
-        if problem:
-            raise ValueError(f'{period} refresh not publishable: {problem}; current site unchanged')
-        heads[period][-1]['coverage']['verified_passes'] = ['A', 'B'] if len(heads[period]) == 2 else ['B', 'C']
-    collected = {}
-    for period in PERIODS:
-        runs = heads[period]
-        tail = None
-        if bound[period] > head_pages[period] and not runs[-1]['coverage']['reached_end']:
-            tail = read_period(client_factory, period, cache(period, '-tail'), bound[period] - head_pages[period], first_page=head_pages[period] + 1,
-                               keep_first=True, budget=budget, sleeper=wait, label='tail', requeue=True)
-            reads[period].append(tail['read'])
-        collected[period] = merge_two_tier(period, runs[-1], runs[0], tail, depth[period], head_pages[period] * 100, bound[period] - head_pages[period])
-        collected[period]['coverage']['reads'] = reads[period]
-    return collected
+    active = lambda: [p for p in PERIODS if p not in failed and p not in collected]
+    try:
+        for period in PERIODS:
+            head(period, '', 'A')
+        if active():
+            budget.sleep(wait, RETRY_DELAY, 'the wait before pass B')
+        for period in active():
+            head(period, '-verify', 'B')
+        unstable = [period for period in active() if stability_problem(*heads[period][-2:], head_pages[period] * 100)]
+        if unstable:
+            budget.sleep(wait, RETRY_DELAY, 'the wait before pass C')
+            for period in unstable:
+                head(period, '-retry', 'C')
+        for period in active():
+            problem = stability_problem(*heads[period][-2:], head_pages[period] * 100)
+            if problem:
+                failed[period] = f'{period} refresh not publishable: {problem}'
+            else:
+                heads[period][-1]['coverage']['verified_passes'] = ['A', 'B'] if len(heads[period]) == 2 else ['B', 'C']
+        for period in active():
+            runs = heads[period]
+            tail = None
+            if bound[period] > head_pages[period] and not runs[-1]['coverage']['reached_end']:
+                tail = read_period(client_factory, period, cache(period, '-tail'), bound[period] - head_pages[period], first_page=head_pages[period] + 1,
+                                   keep_first=True, budget=budget, sleeper=wait, label='tail', requeue=True, on_failed_page=capped(period))
+                reads[period].append(tail['read'])
+            try:
+                collected[period] = merge_two_tier(period, runs[-1], runs[0], tail, depth[period], head_pages[period] * 100, bound[period] - head_pages[period])
+            except ValueError as exc:
+                failed[period] = str(exc).removesuffix('; current site unchanged')
+                continue
+            collected[period]['coverage']['reads'] = reads[period]
+    except BudgetExhausted as exc:
+        for period in active():
+            failed[period] = f'{period} refresh not publishable: {exc}'
+    for period, reason in failed.items():
+        failed[period] = {'reason': reason, 'reads': reads[period]}
+    return collected, failed
 
 
 def parse_depth(value):
@@ -326,21 +353,29 @@ def refresh_dashboard(current, client_factory=FeedClient, max_pages=1000, checkp
     results = []
     budget = Budget(deadline_minutes, clock)
     try:
-        collected = (collect_two_tier(client_factory, depth, verify_top, max_pages, checkpoint_dir, sleeper, budget) if verify_top
-                     else collect_strict(client_factory, max_pages, checkpoint_dir, budget, sleeper))
+        collected, failed = (collect_two_tier(client_factory, depth, verify_top, max_pages, checkpoint_dir, sleeper, budget) if verify_top
+                             else (collect_strict(client_factory, max_pages, checkpoint_dir, budget, sleeper), {}))
     except BudgetExhausted as exc:
         raise ValueError(f'{exc}; current site unchanged') from None
     for period in ('day','week','month'):
-        result = collected[period]
-        coverage = result['coverage']
         prior_feed = next(f for f in current['feeds'] if f['period'] == period)
-        if verify_top:
+        if period in collected and verify_top:
             # Shrink guard: a valid-looking feed that lost over half of min(depth, previous rows) is a broken provider response.
             floor = len(prior_feed['rows']) if depth[period] == 'all' else min(depth[period], len(prior_feed['rows']))
-            if len(result['rows']) < floor / 2:
-                raise ValueError(f'{period} refresh not publishable: {len(result["rows"])} rows is under half of min(depth, previous {len(prior_feed["rows"])}); current site unchanged')
-            if depth[period] != 'all':
-                coverage['bounded_top'] = depth[period]
+            if len(collected[period]['rows']) < floor / 2:
+                failed[period] = {'reason': f'{period} refresh not publishable: {len(collected[period]["rows"])} rows is under half of min(depth, previous {len(prior_feed["rows"])})',
+                                  'reads': collected.pop(period)['coverage'].get('reads')}
+        if period in failed:
+            # Carried: yesterday's rows and its own fetched_at_end stay as published; only the coverage says why.
+            feed = copy.deepcopy(prior_feed)
+            feed['coverage'] = dict(feed.get('coverage') or {}, refreshed=False, not_refreshed_reason=failed[period]['reason'], reads=failed[period]['reads'])
+            results.append(feed)
+            continue
+        result = collected[period]
+        coverage = result['coverage']
+        coverage['refreshed'] = True
+        if verify_top and depth[period] != 'all':
+            coverage['bounded_top'] = depth[period]
         prior = {(r['repo_id'],r['full_name'].casefold()):r for r in prior_feed['rows']}
         rows = []
         for row in result['rows']:
@@ -367,6 +402,8 @@ def refresh_dashboard(current, client_factory=FeedClient, max_pages=1000, checkp
             feed['metadata_coverage'].update(matched_names=matched,unmatched_names=len(rows)-matched,known_by_field=known,unknown_by_field={k:len(rows)-v for k,v in known.items()})
             feed['metadata_coverage']['refresh_note'] = 'Carried cached metadata only for unchanged provider ID and name; original observation dates retained.'
         results.append(feed)
+    if len(failed) == len(PERIODS):
+        raise ValueError(' | '.join(f'{failed[p]["reason"]}; current site unchanged' for p in PERIODS))
     return {'generated_at':dt.datetime.now(dt.timezone.utc).isoformat(),'feeds':results}
 
 
@@ -432,8 +469,9 @@ def stage_site(site_dir, output_dir, mode='refresh', max_pages=1000, checkpoint_
         seeds = seed_created_dates(checkout_data_files(site))
         data = refresh_dashboard(current,client_factory,max_pages,checkpoint_dir,top,depth=depth,verify_top=verify_top,seeds=seeds,
                                  deadline_minutes=deadline_minutes)
-        # New rows arrive without a GitHub creation date; ask GitHub (via gh) before publishing. Failures leave UNKNOWN.
-        created = created_dates(data)
+        # New rows arrive without a GitHub creation date; ask GitHub (via gh) before publishing. Failures leave UNKNOWN. Carried
+        # windows stay exactly as published.
+        created = created_dates(dict(data, feeds=[f for f in data['feeds'] if f['coverage'].get('refreshed', True)]))
     else:
         data, created = copy.deepcopy(current), None
     output.parent.mkdir(parents=True,exist_ok=True)
@@ -458,7 +496,8 @@ def stage_site(site_dir, output_dir, mode='refresh', max_pages=1000, checkpoint_
     return {'mode':mode,'new_retrieval':mode=='refresh','depth':depth if mode == 'refresh' else None,'verify_top':verify_top if mode == 'refresh' else None,
             'top':top if mode == 'refresh' else None,'output':str(output),'previous_published':prior['source'],'notes':notes,'created_dates':created,
             'artifact_bytes':total,'data_files':sizes,'snapshot_id':catalog['snapshot_id'],'previous_generation':sorted(carried),
-            'periods':[{ 'period':f['period'],'rows':len(f['rows']),'status':f['coverage']['status'],'verified_rows':f['coverage'].get('verified_rows'),
+            'periods':[{ 'period':f['period'],'rows':len(f['rows']),'status':f['coverage'].get('status'),'verified_rows':f['coverage'].get('verified_rows'),
+                        'refreshed':f['coverage'].get('refreshed',True),'not_refreshed_reason':f['coverage'].get('not_refreshed_reason'),
                         'created_at_known':sum(r.get('created_at') is not None for r in f['rows']),
                         'tail':f['coverage'].get('tail'),'verified_passes':f['coverage'].get('verified_passes'),'fetched_at_end':f['fetched_at_end'],
                         'reads':f['coverage'].get('reads'),'retries':sum(r['retries'] for r in f['coverage'].get('reads') or [])} for f in data['feeds']],
@@ -501,7 +540,10 @@ def main():
     p.add_argument('--checkpoint-dir');p.add_argument('--diagnostic');a=p.parse_args()
     try:
         result=stage_site(a.site_dir,a.output_dir,a.mode,a.max_pages,a.checkpoint_dir,top=a.top,depth=a.depth,verify_top=a.verify_top,published=previous_publication(a,os.environ),
-                        deadline_minutes=a.deadline_minutes);code=0
+                        deadline_minutes=a.deadline_minutes)
+        # 3: staged and to be deployed, but a window kept its previous rows, so the Actions run is marked failed after the deploy.
+        carried=[x['period'] for x in result['periods'] if not x['refreshed']] if a.mode=='refresh' else []
+        result['status']='partial' if carried else 'ok';result['carried_windows']=carried;code=3 if carried else 0
     except Exception as exc:
         result={'mode':a.mode,'status':'failed','error':f'{type(exc).__name__}: {str(exc)[:500]}','current_site_preserved':True};code=2
     if a.diagnostic:

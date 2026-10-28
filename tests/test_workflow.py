@@ -45,6 +45,12 @@ class WorkflowTests(unittest.TestCase):
     git('checkout','-q','main');(tmp/'work'/name).write_text(text);git('commit','-qam',name);git('push','-q','origin','main');git('checkout','-q','--detach',run)
    land('tests/test_x.py','y');proc=guard();self.assertEqual(proc.returncode,0,proc.stderr);self.assertIn('deploy-relevant sources match live main',proc.stdout)
    land('app.js','changed');proc=guard();self.assertEqual(proc.returncode,1);self.assertIn('newer UI/scripts on main',proc.stderr);self.assertIn('a new run is queued',proc.stderr)
+ def test_a_partial_refresh_is_deployed_and_then_fails_the_run(self):
+  job=WORKFLOW.split('  refresh-and-publish:',1)[1];steps=re.findall(r'      - (?:name: (.*)|uses: (.*))\n',job);names=[n or u for n,u in steps]
+  stage=job.split('id: stage',1)[1].split('      - name:',1)[0]
+  self.assertIn('set +e',stage);self.assertIn('echo "code=$code" >> "$GITHUB_OUTPUT"',stage);self.assertTrue(stage.rstrip().endswith('[ "$code" = 0 ] || [ "$code" = 3 ]'))
+  self.assertEqual(names[-2:],['Deploy exact artifact','Fail the run when a window kept its previous rows'])  # after the deploy, never before
+  self.assertIn("        if: steps.stage.outputs.code == '3'\n",job.split('Fail the run when a window kept its previous rows',1)[1])
  def test_depth_and_verify_top_reach_the_script_and_the_run_may_take_six_hours(self):
   self.assertIn('timeout-minutes: 360',WORKFLOW)
   self.assertIn('--depth "$DEPTH" --verify-top "$VERIFY_TOP" ${TOP:+--top "$TOP"}',WORKFLOW)
