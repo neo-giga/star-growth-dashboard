@@ -2,10 +2,18 @@
 
 A date is accepted only when GitHub's databaseId agrees with the row's cached GitHub ID; rows without
 a cached ID take the date and record the ID. Rows GitHub cannot resolve stay UNKNOWN.
+The GITHUB_TOKEN GraphQL budget is small (assume 1,000 points per hour), so a run sends at most
+MAX_QUERIES batched queries, in feed/rank order, and stops at the first rate-limit answer; the rest
+stays UNKNOWN and fills on later days. Dates never fail a publish.
 """
 from __future__ import annotations
 import argparse, datetime as dt, json, re, subprocess
 NAME = re.compile(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+')
+MAX_QUERIES = 900
+
+
+class RateLimited(RuntimeError):
+    """GitHub answered RATE_LIMITED: later queries in this run would only burn the remaining budget."""
 
 
 def query_created_dates(names):
@@ -23,6 +31,9 @@ def query_created_dates(names):
     except ValueError:
         raise RuntimeError((proc.stderr.strip() or 'gh api graphql returned no JSON')[:300]) from None
     data = payload.get('data') if isinstance(payload, dict) else None
+    errors = payload.get('errors') if isinstance(payload, dict) and isinstance(payload.get('errors'), list) else []
+    if any(isinstance(e, dict) and e.get('type') == 'RATE_LIMITED' for e in errors):
+        raise RateLimited(str(next(e.get('message') for e in errors if isinstance(e, dict) and e.get('type') == 'RATE_LIMITED'))[:300])
     found = {}
     for index, name in enumerate(names):
         node = (data or {}).get(f'r{index}')
@@ -59,20 +70,26 @@ def merge_created_dates(rows, found):
     return filled
 
 
-def fill_created_dates(data, query=query_created_dates, batch_size=100):
-    """Query every missing name once (batched), merge into every feed, refresh creation_dates counts."""
+def fill_created_dates(data, query=query_created_dates, batch_size=100, max_queries=MAX_QUERIES):
+    """Query missing names once each (batched, feed/rank order, at most max_queries batches), merge into every feed, refresh
+    creation_dates counts. Names beyond the budget are deferred to a later run."""
     missing = {}
     for feed in data.get('feeds', []):
         for row in feed.get('rows', []):
             if row.get('created_at') is None and isinstance(row.get('full_name'), str):
                 missing.setdefault(row['full_name'].casefold(), row['full_name'])
-    names = list(missing.values())
-    summary = {'requested': len(names), 'filled': 0, 'batches': 0, 'failed_batches': 0, 'errors': []}
+    names = list(missing.values())[:max_queries * batch_size]
+    summary = {'requested': len(names), 'deferred': len(missing) - len(names), 'filled': 0, 'batches': 0, 'failed_batches': 0, 'errors': [], 'stopped': None}
     found = {}
     for start in range(0, len(names), batch_size):
         summary['batches'] += 1
         try:
             found.update(query(names[start:start + batch_size]))
+        except RateLimited as exc:
+            summary['failed_batches'] += 1
+            summary['stopped'] = f'rate limited after {summary["batches"]} queries: {exc}'
+            summary['deferred'] += len(names) - start - batch_size if start + batch_size < len(names) else 0
+            break
         except (RuntimeError, OSError) as exc:
             summary['failed_batches'] += 1
             summary['errors'].append(str(exc)[:300])
@@ -89,10 +106,11 @@ def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument('--data', required=True, help='dashboard data.json to read')
     p.add_argument('--output', required=True, help='where to write the filled data.json')
+    p.add_argument('--max-queries', type=int, default=MAX_QUERIES, help='GraphQL queries per run (100 names each)')
     a = p.parse_args()
     with open(a.data) as f:
         data = json.load(f)
-    summary = fill_created_dates(data)
+    summary = fill_created_dates(data, max_queries=a.max_queries)
     with open(a.output, 'w') as f:
         f.write(json.dumps(data, separators=(',', ':')) + '\n')
     print(json.dumps(summary, indent=2))
