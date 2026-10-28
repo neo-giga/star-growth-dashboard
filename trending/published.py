@@ -127,21 +127,25 @@ def extract_pages_artifact(zip_path, target):
     tar_path.unlink()
 
 
-def deployed(repo, token, run_id, api=API_URL):
-    """Whether the run's latest attempt completed its deploy step (a run that carried a window deploys, then fails)."""
-    jobs = github_json(f'{api}/repos/{repo}/actions/runs/{run_id}/jobs?filter=latest&per_page=100', token)['jobs']
-    return any(step.get('name') == DEPLOY_STEP and step.get('conclusion') == 'success' for job in jobs for step in job.get('steps') or [])
+def deployed_at(repo, token, run_id, api=API_URL):
+    """When the run's deploy step last succeeded in ANY attempt (completed_at), or None. filter=all: a re-run attempt that fails
+    before deploying must not hide an earlier attempt's deployment (the site still shows what that attempt deployed)."""
+    jobs = github_json(f'{api}/repos/{repo}/actions/runs/{run_id}/jobs?filter=all&per_page=100', token)['jobs']
+    times = [step.get('completed_at') or '' for job in jobs for step in job.get('steps') or []
+             if step.get('name') == DEPLOY_STEP and step.get('conclusion') == 'success']
+    return max(times) if times else None
 
 
 def latest_publication(repo, token, dest, api=API_URL):
-    """The site this workflow last deployed: the newest completed run on main whose deploy step succeeded (whatever the run's own
-    conclusion), downloaded from its `github-pages` artifact into dest. Runs that never deployed never changed the site and are
-    skipped; when the deploying run's artifact cannot be read this raises: an older artifact would roll the site back."""
-    runs = github_json(f'{api}/repos/{repo}/actions/workflows/{WORKFLOW}/runs?status=completed&branch=main&per_page=20', token)['workflow_runs']
-    runs = sorted(runs, key=lambda r: r.get('run_started_at') or r['created_at'], reverse=True)  # a re-run attempt deploys at its own start
-    run = next((r for r in runs if deployed(repo, token, r['id'], api)), None)
-    if run is None:
+    """The site this workflow last deployed: among recent runs on main (any status: a run may be re-running or deploy and then
+    fail), the one whose successful deploy step completed last, downloaded from its `github-pages` artifact into dest. Runs that
+    never deployed never changed the site and are skipped; when the deploying run's artifact cannot be read this raises: an older
+    artifact would roll the site back. Re-runs are refused by the workflow, so a run owns at most one such artifact."""
+    runs = github_json(f'{api}/repos/{repo}/actions/workflows/{WORKFLOW}/runs?branch=main&per_page=30', token)['workflow_runs']
+    deployments = [(when, r) for r in runs if (when := deployed_at(repo, token, r['id'], api))]
+    if not deployments:
         raise ValueError(f'no {WORKFLOW} run among the last {len(runs)} on main deployed')
+    when, run = max(deployments, key=lambda item: item[0])
     listed = github_json(f'{api}/repos/{repo}/actions/runs/{run["id"]}/artifacts?name={PAGES_ARTIFACT}&per_page=100', token)['artifacts']
     usable = [a for a in listed if a.get('name') == PAGES_ARTIFACT and not a.get('expired')]
     if not usable:
@@ -152,7 +156,7 @@ def latest_publication(repo, token, dest, api=API_URL):
     download_artifact(artifact['archive_download_url'], token, dest / 'artifact.zip')
     extract_pages_artifact(dest / 'artifact.zip', dest / 'site')
     (dest / 'artifact.zip').unlink()
-    return LocalSite(dest / 'site', label=f'artifact:run {run["id"]} ({run.get("event")}, {run.get("conclusion")}, {str(run.get("head_sha"))[:7]}, started {run.get("run_started_at")})')
+    return LocalSite(dest / 'site', label=f'artifact:run {run["id"]} ({run.get("event")}, {run.get("conclusion")}, {str(run.get("head_sha"))[:7]}, deployed {when})')
 
 
 def validate_dashboard(data):

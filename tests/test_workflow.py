@@ -45,6 +45,14 @@ class WorkflowTests(unittest.TestCase):
     git('checkout','-q','main');(tmp/'work'/name).write_text(text);git('commit','-qam',name);git('push','-q','origin','main');git('checkout','-q','--detach',run)
    land('tests/test_x.py','y');proc=guard();self.assertEqual(proc.returncode,0,proc.stderr);self.assertIn('deploy-relevant sources match live main',proc.stdout)
    land('app.js','changed');proc=guard();self.assertEqual(proc.returncode,1);self.assertIn('newer UI/scripts on main',proc.stderr);self.assertIn('a new run is queued',proc.stderr)
+ def test_a_re_run_is_refused_before_anything_else(self):
+  job=WORKFLOW.split('    steps:\n',1)[1]
+  self.assertTrue(job.startswith('      - name: Refuse a re-run\n'))
+  script=re.search(r'      - name: Refuse a re-run\n        run: \|\n((?:          .*\n)+)',job)[1]
+  for attempt,code in (('1',0),('2',1)):
+   proc=subprocess.run(['bash','-e','-c',script],env={'GITHUB_RUN_ATTEMPT':attempt,'PATH':'/usr/bin:/bin'},capture_output=True,text=True)
+   self.assertEqual(proc.returncode,code)
+  self.assertIn('re-runs are disabled; dispatch a new run',proc.stderr)
  def test_a_partial_refresh_is_deployed_and_then_fails_the_run(self):
   job=WORKFLOW.split('  refresh-and-publish:',1)[1];steps=re.findall(r'      - (?:name: (.*)|uses: (.*))\n',job);names=[n or u for n,u in steps]
   stage=job.split('id: stage',1)[1].split('      - name:',1)[0]

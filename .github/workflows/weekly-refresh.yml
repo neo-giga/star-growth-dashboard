@@ -75,6 +75,10 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - name: Refuse a re-run
+        run: |
+          # Every run owns at most one github-pages artifact: the next run reads the publication back from the run that deployed it.
+          if [ "$GITHUB_RUN_ATTEMPT" != 1 ]; then echo "re-runs are disabled; dispatch a new run" >&2; exit 1; fi
       - uses: actions/checkout@v4
         with:
           persist-credentials: false

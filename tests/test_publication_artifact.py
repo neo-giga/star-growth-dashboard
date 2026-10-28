@@ -21,8 +21,12 @@ def pages_zip(root):
  out=io.BytesIO()
  with zipfile.ZipFile(out,'w') as z:z.writestr('artifact.tar',tar.getvalue())
  return out.getvalue()
-def run(rid,started,event='schedule',conclusion='success',deployed=True):
- return {'id':rid,'event':event,'head_sha':f'{rid:040x}','created_at':started,'run_started_at':started,'conclusion':conclusion,'deployed':deployed}
+def run(rid,started,event='schedule',conclusion='success',deployed=True,attempts=None,status='completed'):
+ """A workflow run; attempts lists each attempt's deploy-step completion time (None: that attempt did not deploy). By default one
+ attempt that deployed a minute after it started, or did not deploy."""
+ attempts=attempts if attempts is not None else [started.replace(':00Z',':01Z') if deployed else None]
+ return {'id':rid,'event':event,'head_sha':f'{rid:040x}','created_at':started,'run_started_at':started,'conclusion':conclusion,'status':status,
+         'run_attempt':len(attempts),'attempts':attempts}
 class FakeGitHub:
  def __init__(self,runs,artifacts,zips,cdn=None):
   self.runs,self.artifacts,self.zips,self.cdn=runs,artifacts,zips,cdn;self.hits=[]
@@ -38,10 +42,14 @@ class FakeGitHub:
     if parts[0]=='api':
      if self.headers.get('Authorization')!='Bearer tok':return self.send(401)
      if parts[1:7]==['repos','o','r','actions','workflows','weekly-refresh.yml'] and parts[7]=='runs':
-      assert (q['status'],q['branch'])==('completed','main'),q;return self.send(200,json.dumps({'workflow_runs':outer.runs}).encode())
+      assert q['branch']=='main',q;runs=[r for r in outer.runs if r['status']==q.get('status',r['status']) or (q.get('status')=='success' and r['conclusion']=='success')]
+      return self.send(200,json.dumps({'workflow_runs':runs}).encode())
      if parts[1:6]==['repos','o','r','actions','runs'] and parts[7]=='jobs':
-      r=next(r for r in outer.runs if r['id']==int(parts[6]));steps=[['Stage validated site without changing current files','success' if r['deployed'] or r['conclusion']=='success' else 'failure'],['Deploy exact artifact','success' if r['deployed'] else 'skipped']]
-      return self.send(200,json.dumps({'jobs':[{'name':'refresh-and-publish','steps':[{'name':n,'conclusion':c} for n,c in steps]}]}).encode())
+      r=next(r for r in outer.runs if r['id']==int(parts[6]));attempts=list(enumerate(r['attempts'],1))
+      if q.get('filter','latest')=='latest':attempts=attempts[-1:]  # GitHub's default: only the latest attempt's jobs
+      jobs=[{'name':'refresh-and-publish','run_attempt':n,'steps':[{'name':'Stage validated site without changing current files','conclusion':'success' if at else 'failure','completed_at':None},
+             {'name':'Deploy exact artifact','conclusion':'success' if at else 'skipped','completed_at':at}]} for n,at in attempts]
+      return self.send(200,json.dumps({'jobs':jobs}).encode())
      if parts[1:6]==['repos','o','r','actions','runs'] and parts[7]=='artifacts':
       return self.send(200,json.dumps({'artifacts':[a for a in outer.artifacts.get(int(parts[6]),[]) if a['name']==q.get('name')]}).encode())
      if parts[1:6]==['repos','o','r','actions','artifacts'] and parts[7]=='zip':
@@ -80,7 +88,7 @@ class ArtifactPublicationTests(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    old=old_format_site(tmp,current());gh=self.serve([run(40710274815,'2026-10-28T14:52:39Z','workflow_dispatch')],{40710274815:[artifact(12825067811)]},{12825067811:pages_zip(old)})
    site=latest_publication('o/r','tok',pathlib.Path(tmp)/'dl',api=gh.url('api'))
-   self.assertEqual(str(site),'artifact:run 40710274815 (workflow_dispatch, success, 0000000, started 2026-10-28T14:52:39Z)');self.assertEqual(gh.count('/blob/'),1)
+   self.assertEqual(str(site),'artifact:run 40710274815 (workflow_dispatch, success, 0000000, deployed 2026-10-28T14:52:39Z)');self.assertEqual(gh.count('/blob/'),1)
    out=pathlib.Path(tmp)/'output';result=w.stage_site(checkout(tmp),out,'validate-current',client_factory=lambda **kw:self.fail('network'),published=site)
    self.assertEqual(result['snapshot_id'],json.loads((old/'api/v1/catalog.json').read_text())['snapshot_id']);self.assertEqual(result['previous_published'],str(site))
    self.assertEqual([len(f['rows']) for f in w.read_current(out)['feeds']],[1,1,1]);self.assertEqual((out/'api/v1/catalog.json').read_bytes(),(old/'api/v1/catalog.json').read_bytes())
@@ -119,6 +127,23 @@ class ArtifactPublicationTests(unittest.TestCase):
    code,diag=self.cli(gh,tmp)
    self.assertEqual(code,0,diag);self.assertTrue(diag['previous_published'].startswith('artifact:run 2 (schedule, failure, '),diag['previous_published'])
    self.assertEqual(diag['snapshot_id'],w.read_current(partial)['agent_snapshot_id']);self.assertEqual(gh.count('/blob/'),1);self.assertEqual(gh.count('/cdn/'),0)
+ def test_a_failed_re_run_never_hides_the_deployment_of_an_earlier_attempt(self):
+  # Codex full-lists review 2 #1: A publishes; B publishes fresh day/week, carries month, then fails (exit 3); B is re-run and the
+  # re-run fails before deploying (or is still running). B's first attempt is what is live: selecting A would roll back.
+  with tempfile.TemporaryDirectory() as tmp:
+   a_site=publish(tmp,current(),name='a');b_data=current()
+   for f in b_data['feeds'][:2]:f['rows'][0]['stars']=300;f['fetched_at_end']='2026-10-29T00:00:00Z'
+   b_site=publish(tmp,b_data,name='b')
+   for b_status in ('completed','in_progress'):
+    with self.subTest(b_status=b_status):
+     gh=self.serve([run(1,'2026-10-28T07:00:00Z'),run(2,'2026-10-29T07:00:00Z',conclusion='failure' if b_status=='completed' else None,status=b_status,attempts=['2026-10-29T08:10:00Z',None])],
+                   {1:[artifact(11)],2:[artifact(22)]},{11:pages_zip(a_site),22:pages_zip(b_site)},cdn=a_site)
+     code,diag=self.cli(gh,tmp)
+     self.assertEqual(code,0,diag);self.assertEqual(diag['previous_published'],'artifact:run 2 (schedule, %s, 0000000, deployed 2026-10-29T08:10:00Z)'%('failure' if b_status=='completed' else None))
+     self.assertEqual(diag['snapshot_id'],w.read_current(b_site)['agent_snapshot_id']);self.assertEqual(gh.count('/blob/11'),0)
+   gh=self.serve([run(1,'2026-10-28T07:00:00Z'),run(2,'2026-10-29T07:00:00Z',conclusion='failure',attempts=['2026-10-29T08:10:00Z',None])],{1:[artifact(11)],2:[artifact(22,expired=True)]},{11:pages_zip(a_site)},cdn=a_site)
+   code,diag=self.cli(gh,tmp)
+   self.assertEqual(code,2);self.assertIn('newest deploying run 2 has no unexpired github-pages artifact; current site unchanged',diag['error']);self.assertEqual(gh.count('/blob/'),0)
  def test_outside_actions_an_explicit_source_is_required(self):
   with tempfile.TemporaryDirectory() as tmp:
    pub=publish(tmp,current());gh=self.serve([],{},{},cdn=pub)
