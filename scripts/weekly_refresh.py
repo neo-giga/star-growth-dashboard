@@ -134,7 +134,15 @@ def merge_two_tier(period, head, first_head, tail, depth, verify_top, tail_bound
     """The published period: the verified head (its latest agreeing pass) followed by pass A's once-read tail, or why the
     tail is not publishable (ValueError). Tail rows already in the head are dropped (the head rank is the best rank);
     a provider total that moves during the tail is tolerated and recorded, a fetch failure, a stop before the provider's
-    end (or before the depth bound) or unique rows under TAIL_COVERAGE of the smaller first/last total are not."""
+    end (or before the depth bound) or unique rows under TAIL_COVERAGE of the smaller first/last total are not. Whenever a tail is
+    due (depth all, or a depth past the head), pass A's own head must have succeeded and the tail must exist unless that head
+    reached the provider end: later head passes agreeing never stand in for a tail that was never read."""
+    if depth == 'all' or tail_bound > 0:
+        first = first_head['coverage']
+        if first['failure']:
+            raise ValueError(f'{period} refresh not publishable: pass A head {first["failure"]}; current site unchanged')
+        if tail is None and not first['reached_end']:
+            raise ValueError(f'{period} refresh not publishable: no tail read: the {verify_top // 100 + tail_bound}-page bound stops at the head before the provider end; current site unchanged')
     coverage = copy.deepcopy(head['coverage'])
     rows = list(head['rows'])
     first_total = first_head['coverage']['reported_total']

@@ -317,6 +317,20 @@ class TwoTierRefreshTests(unittest.TestCase):
    w.refresh_dashboard(prior(2000),client_factory=lambda **kw:Provider(12195,fail_page=50).factory(max_attempts=1,**kw),sleeper=lambda s:None)
   with self.assertRaisesRegex(ValueError,'day refresh not publishable: tail stopped after 80 pages before the provider end; current site unchanged'):
    w.refresh_dashboard(prior(2000),client_factory=Provider(12195).factory,max_pages=100,sleeper=lambda s:None)
+ def test_head_failure_in_pass_a_fails_closed_even_when_b_and_c_agree(self):
+  # Codex full-lists review #1: pass A fails on head page 5, so no tail is read; B and C then agree on the head. That must never
+  # publish the 2,000-row head as the whole feed.
+  p=Provider(12195);failed=[]
+  def flaky(url):
+   q=dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
+   if (q['time'],q['page'])==('day','5') and not failed:failed.append(url);raise urllib.error.URLError('synthetic connection reset')
+   return p(url)
+  with self.assertRaisesRegex(ValueError,'day refresh not publishable: pass A head URLError: <urlopen error synthetic connection reset>; current site unchanged'):
+   w.refresh_dashboard(prior(2000),client_factory=lambda **kw:FeedClient(fetch=flaky,max_attempts=1,**kw),sleeper=lambda s:None)
+  self.assertEqual(len(failed),1)
+ def test_max_pages_at_the_head_never_publishes_the_head_as_the_whole_feed(self):
+  with self.assertRaisesRegex(ValueError,'day refresh not publishable: no tail read: the 20-page bound stops at the head before the provider end; current site unchanged'):
+   w.refresh_dashboard(prior(2000),client_factory=Provider(12195).factory,max_pages=20,sleeper=lambda s:None)
  def test_head_mismatch_retries_only_the_head_and_the_tail_stays_from_pass_a(self):
   p=Provider(12195,drop_after=('day',1));sleeps=[];data=w.refresh_dashboard(prior(2000),client_factory=p.factory,sleeper=sleeps.append)
   day=data['feeds'][0];ids=[r['repo_id'] for r in day['rows']]
