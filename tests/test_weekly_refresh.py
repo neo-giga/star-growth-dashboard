@@ -90,12 +90,12 @@ class WeeklyRefreshTests(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    site=checkout(tmp);pub=publish(tmp,current());out=pathlib.Path(tmp)/'output';served=live(pub)
    with patch.object(w.time,'sleep',lambda s:None):result=w.stage_site(site,out,'refresh',client_factory=factory(),created_dates=lambda data:{'requested':0},published=served)
-   self.assertIn('cached GitHub metadata carried for 3 previously published rows',result['notes']);self.assertEqual(served.requests,2+3+2+3)  # index, app, 3 windows, catalog, manifest, the snapshot's three all.jsonl files only
+   self.assertIn('published snapshot records (cached GitHub metadata) attached to 3 previously published rows',result['notes']);self.assertEqual(served.requests,2+3+2+3)  # index, app, 3 windows, catalog, manifest, the snapshot's three all.jsonl files only
    records=snapshot_records(read_snapshot(LocalSite(out),result['snapshot_id'],'records'))
    r=records['week']['gittrend:1'];self.assertEqual(r['metadata']['description'],'cached');self.assertEqual(r['provenance']['metadata_observed_at'],'2025-12-01T00:00:00Z');self.assertEqual(r['identity']['github_metadata_repo_id'],99)
    broken=publish(tmp,current(),name='broken');(broken/'api/v1/catalog.json').write_text('{"snapshot_id":"0000"}')
    with patch.object(w.time,'sleep',lambda s:None):result=w.stage_site(site,pathlib.Path(tmp)/'out2','refresh',client_factory=factory(),created_dates=lambda data:{'requested':0},published=live(broken))
-   self.assertTrue(any(n.startswith('published snapshot') and 'unreadable' in n for n in result['notes']));self.assertIn('cached GitHub metadata carried for 0 previously published rows',result['notes'])
+   self.assertTrue(any(n.startswith('published snapshot') and 'unreadable' in n for n in result['notes']));self.assertIn('published snapshot records (cached GitHub metadata) attached to 0 previously published rows',result['notes'])
  def test_partial_inconsistent_failure_does_not_touch_last_good(self):
   for status in ('partial','inconsistent'):
    with tempfile.TemporaryDirectory() as tmp:
@@ -352,3 +352,13 @@ class TwoTierRefreshTests(unittest.TestCase):
    for args in (['--depth','150'],['--depth','x'],['--verify-top','150'],['--top','150']):
     proc=subprocess.run([sys.executable,str(ROOT/'scripts/weekly_refresh.py'),'--site-dir',str(site),'--output-dir',str(out),'--published-site',NO_SITE,*args],capture_output=True,text=True)
     self.assertNotEqual(proc.returncode,0,args);self.assertFalse(out.exists())
+ def test_staged_artifact_for_the_full_lists_stays_far_under_300_mb(self):
+  # 12,195 + 32,694 + 66,772 rows (the 2026-10-28 provider totals) through the real staging: three window files, one snapshot of the
+  # verified heads only. GitHub Pages' site limit is 1 GB; a full-row snapshot per day would have been ~390 MB.
+  with tempfile.TemporaryDirectory() as tmp:
+   site=checkout(tmp);pub=publish(tmp,prior(2000));out=pathlib.Path(tmp)/'output';p=Provider(0,totals=self.TOTALS)
+   with patch.object(w.time,'sleep',lambda s:None):result=w.stage_site(site,out,'refresh',client_factory=p.factory,created_dates=lambda data:{'requested':0},published=live(pub))
+   self.assertEqual([x['rows'] for x in result['periods']],[12195,32694,66772]);self.assertLess(result['artifact_bytes'],300*1024*1024)
+   self.assertLess(sum(f.stat().st_size for f in (out/'api').rglob('*') if f.is_file()),40*1024*1024)
+   self.assertEqual(len(list((out/'api/v1/snapshots').iterdir())),1);self.assertEqual(len([n for n in out.iterdir() if n.name.startswith('data-')]),3)
+   print(f"\nartifact {result['artifact_bytes']/1e6:.1f} MB for {sum(x['rows'] for x in result['periods'])} rows; window files {result['data_files']}")

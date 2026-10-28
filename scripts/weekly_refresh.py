@@ -317,7 +317,7 @@ def stage_site(site_dir, output_dir, mode='refresh', max_pages=1000, checkpoint_
     current, notes = prior['data'], list(prior['notes'])
     if mode == 'refresh':
         hydrated = hydrate_metadata(current, snapshot_records(prior['snapshot']), METADATA_FIELDS) if prior['snapshot'] else 0
-        notes.append(f'cached GitHub metadata carried for {hydrated} previously published rows')
+        notes.append(f'published snapshot records (cached GitHub metadata) attached to {hydrated} previously published rows')
         seeds = seed_created_dates(checkout_data_files(site))
         data = refresh_dashboard(current,client_factory,max_pages,checkpoint_dir,top,depth=depth,verify_top=verify_top,seeds=seeds)
         # New rows arrive without a GitHub creation date; ask GitHub (via gh) before publishing. Failures leave UNKNOWN.
