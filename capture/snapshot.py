@@ -13,9 +13,10 @@ QUERY = '''query($ids: [ID!]!) {
 BATCH = 100
 
 
-def read_counts(gh, node_ids, workers=4, batch=BATCH, clock=time.monotonic):
+def read_counts(gh, node_ids, workers=4, batch=BATCH, clock=time.monotonic, failed=None):
     """-> (rows, stats): rows = {node_id: {full_name, stars, language, created_at}} for every node read; stats counts
-    queries, points, failed queries (after retries) and ids missing from the answer (deleted, private or not a repository)."""
+    queries, points, failed queries (after retries) and ids missing from the answer (deleted, private or not a repository).
+    `failed`, a list, receives the ids of the failed queries: unread today, unlike a missing id the answer said is null."""
     node_ids = list(node_ids)
     rows, stats, lock = {}, {'asked': len(node_ids), 'read': 0, 'missing': 0, 'queries': 0, 'points': 0, 'failed_queries': 0, 'seconds': 0}, threading.Lock()
     started = clock()
@@ -27,6 +28,8 @@ def read_counts(gh, node_ids, workers=4, batch=BATCH, clock=time.monotonic):
             with lock:
                 stats['failed_queries'] += 1
                 stats['queries'] += 1
+                if failed is not None:
+                    failed.extend(ids)
             return
         got = {}
         for node in data.get('nodes') or []:

@@ -4,7 +4,7 @@ import contextlib, datetime as dt, importlib.util, io, json, pathlib, shutil, su
 from unittest import mock
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from capture.github import GitHub
-from capture.history import WINDOWS, pacific_date
+from capture.history import PACIFIC, WINDOWS, pacific_date
 from capture.store import DataDir
 from fake_github import FakeClock, make_world
 
@@ -18,17 +18,18 @@ THRESHOLD = 2000
 
 
 def expected_gain(world, node_id, days, k, entered, instants):
-    """The plain recomputation: snapshot diff when the repo was in the set N days ago, else the history days since the window
-    start through the entry day plus the change since the entry count, else None."""
+    """The plain recomputation: snapshot diff when the repo was in the set N days ago, else the stars given from N x 24 h before
+    the capture (that Pacific day pro rata) through the entry, plus the change since the entry count, within 0..stars."""
     now = instants[k]
-    date = pacific_date(now)
     if k - days >= entered:
         return world.stars(node_id, now) - world.stars(node_id, instants[k - days])
-    first = date - dt.timedelta(days=days - 1)
-    entry = instants[entered]
-    if first > pacific_date(entry):
-        return None
-    return world.gained(node_id, first, pacific_date(entry), entry) + world.stars(node_id, now) - world.stars(node_id, entry)
+    start, entry = now - dt.timedelta(days=days), instants[entered]
+    first = pacific_date(start)
+    day_start, day_end = (dt.datetime.combine(d, dt.time(), PACIFIC).astimezone(dt.timezone.utc) for d in (first, first + dt.timedelta(days=1)))
+    head = world.day_count(node_id, first, entry) * (day_end - start) / (day_end - day_start)
+    rest = world.gained(node_id, first + dt.timedelta(days=1), pacific_date(entry), entry)
+    stars = world.stars(node_id, now)
+    return max(0, min(stars, round(head + rest + stars - world.stars(node_id, entry))))
 
 
 class DailyCaptureTests(unittest.TestCase):
@@ -112,6 +113,25 @@ class DailyCaptureTests(unittest.TestCase):
         self.assertFalse([name for name in staged if name.startswith('windows/')])  # committed daily it would cost ~141 MiB a year
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(build_windows.main(['--data-dir', str(self.tmp / 'empty')]), 2)
+
+    def test_entrant_history_is_read_within_the_anchor_bound(self):
+        # Codex finding 2, daily path: 400 entrants x 2 pages at a second per request took ~13 min after one shared anchor.
+        self.world.now = START
+        def fetch(*args):
+            self.world.now += dt.timedelta(seconds=1)
+            return self.world.fetch(*args)
+        clock = FakeClock()
+        gh = GitHub('t', fetch=fetch, sleeper=clock.sleep, clock=clock, max_attempts=3)
+        code, diag = daily_capture.run(gh, self.data, THRESHOLD, now=START, wall=lambda: self.world.now, log=lambda *_: None)
+        history = self.data.read_history_all()
+        self.assertGreater(len(history), 150); self.assertEqual(diag['new_entrants']['history_read'], len(history))
+        last_read = {}
+        for _, url, instant in self.world.requests:
+            if 'stargazers/history' in url:
+                last_read[url.split('/repos/')[1].split('/stargazers')[0]] = instant
+        for node_id, record in history.items():
+            age = (last_read[self.world.repos[node_id]['full_name']] - dt.datetime.fromisoformat(record['anchor_at'])).total_seconds()
+            self.assertTrue(0 <= age <= 120, (node_id, age))  # capture.history.MAX_ANCHOR_AGE
 
     def test_a_search_outage_keeps_the_snapshot_and_reports_a_partial_discovery(self):
         self.run_day(0)

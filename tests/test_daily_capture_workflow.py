@@ -59,7 +59,10 @@ class DailyCaptureWorkflowTests(unittest.TestCase):
         checkout, commit = step_script('Check out the data branch, or start it'), step_script("Commit the day's files to the data branch")
         with tempfile.TemporaryDirectory() as tmp:
             tmp = pathlib.Path(tmp)
-            env = dict(os.environ, RUNNER_TEMP=str(tmp / 'runner'), GIT_AUTHOR_NAME='t', GIT_AUTHOR_EMAIL='t@t', GIT_COMMITTER_NAME='t', GIT_COMMITTER_EMAIL='t@t')
+            # A clean runner: no identity from the environment or any config file, and none guessed from the host name.
+            env = {k: v for k, v in os.environ.items() if not k.startswith(('GIT_AUTHOR_', 'GIT_COMMITTER_', 'GIT_CONFIG'))}
+            env.update(RUNNER_TEMP=str(tmp / 'runner'), HOME=str(tmp), GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_COUNT='1',
+                       GIT_CONFIG_KEY_0='user.useConfigOnly', GIT_CONFIG_VALUE_0='true')
             (tmp / 'runner').mkdir()
             git = lambda *a, cwd=tmp / 'work': subprocess.run(['git', '-c', 'user.name=t', '-c', 'user.email=t@t', *a], cwd=cwd, check=True, capture_output=True, text=True, env=env).stdout.strip()
             subprocess.run(['git', 'init', '-q', '--bare', '-b', 'main', str(tmp / 'origin.git')], check=True)
@@ -86,6 +89,7 @@ class DailyCaptureWorkflowTests(unittest.TestCase):
             proc = run2(commit); self.assertEqual(proc.returncode, 0, proc.stderr + proc.stdout)
             self.assertEqual(sorted(git('ls-tree', '--name-only', '-r', 'data', cwd=tmp / 'origin.git').split()), ['history/aa.json', 'snapshots/d1', 'snapshots/d2'])
             self.assertEqual(git('rev-list', '--count', 'data', cwd=tmp / 'origin.git'), '3')
+            self.assertEqual(git('log', '-1', '--format=%cn <%ce>', 'data', cwd=tmp / 'origin.git'), 'github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>')
             self.assertFalse((tmp / 'runner/unpushed-data-commit.patch').exists())
             # 4. a conflicting concurrent change leaves the commit as a patch artifact and fails
             (tmp / 'work/data-branch/snapshots/d3').write_text('theirs'); git('pull', '-q', '--rebase', 'origin', 'data', cwd=tmp / 'work/data-branch')

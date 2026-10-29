@@ -34,13 +34,15 @@ class World:
         self.search_down = False
         self.flaky = {}  # url substring -> remaining 502s to answer before serving
         self.max_per_page = None  # search answers 502 for larger pages (the degraded state measured 2026-10-29)
+        self.incomplete = set()  # search URL substrings answered 200 with incomplete_results: true (a timed-out search)
         self.remaining = {'core': 5000, 'search': 30, 'graphql': 5000}
 
-    def add(self, node_id, full_name, arrivals, language=None, created='2024-01-07T00:00:00Z'):
+    def add(self, node_id, full_name, arrivals, language=None, created='2024-01-07T00:00:00Z', fork=False):
         prefix = [0]
         for n in arrivals:
             prefix.append(prefix[-1] + n)
-        self.repos[node_id] = {'node_id': node_id, 'full_name': full_name, 'arrivals': arrivals, 'prefix': prefix, 'language': language, 'created_at': created, 'gone': False}
+        self.repos[node_id] = {'node_id': node_id, 'full_name': full_name, 'arrivals': arrivals, 'prefix': prefix, 'language': language, 'created_at': created, 'gone': False,
+                               'fork': fork}
 
     # -- truth -------------------------------------------------------------------------------------------------------
     @staticmethod
@@ -114,7 +116,8 @@ class World:
         if self.search_down:
             return 502, {}, b'<html>502 Bad Gateway</html>'
         params = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
-        q = params['q'][0]
+        q, forks = re.subn(r' fork:(true|only)$', '', params['q'][0])  # like the API: forks are left out unless fork:true (or fork:only) is given
+        forks = re.search(r'fork:(true|only)$', params['q'][0])[1] if forks else None
         page, per_page = int(params.get('page', ['1'])[0]), int(params.get('per_page', ['30'])[0])
         if self.max_per_page is not None and per_page > self.max_per_page:
             return 502, self._headers('search'), b'{"message":"Server Error"}'
@@ -128,7 +131,7 @@ class World:
             return 422, self._headers('search'), b'{"message":"bad query"}'
         rows = []
         for repo in self.repos.values():
-            if repo['gone']:
+            if repo['gone'] or (repo['fork'] and forks is None) or (not repo['fork'] and forks == 'only'):
                 continue
             stars = self.stars(repo['node_id'], self.now)
             if stars >= lo and (hi is None or stars <= hi):
@@ -138,7 +141,8 @@ class World:
             return 422, self._headers('search'), b'{"message":"Only the first 1000 search results are available"}'
         items = [{'node_id': r['node_id'], 'full_name': r['full_name'], 'stargazers_count': s, 'language': r['language'], 'created_at': r['created_at']}
                  for s, r in rows[(page - 1) * per_page:page * per_page]]
-        return 200, self._headers('search'), json.dumps({'total_count': len(rows), 'incomplete_results': False, 'items': items}).encode()
+        incomplete = any(needle in url for needle in self.incomplete)
+        return 200, self._headers('search'), json.dumps({'total_count': len(rows), 'incomplete_results': incomplete, 'items': items}).encode()
 
     def _graphql(self, body):
         ids = body['variables']['ids']

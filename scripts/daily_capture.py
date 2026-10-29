@@ -12,8 +12,8 @@ from __future__ import annotations
 import argparse, datetime as dt, json, pathlib, shutil, sys, tempfile, time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from capture.discovery import WORKERS as DISCOVERY_WORKERS, discover, total_count
-from capture.github import GitHub, GitHubError, token_from_environment
-from capture.history import fold, pacific_date, read_pages
+from capture.github import GitHub, token_from_environment
+from capture.history import anchored_reads, fold, pacific_date, read_pages
 from capture.snapshot import read_counts
 from capture.store import DataDir
 from capture.windows import build_page
@@ -91,20 +91,17 @@ def run(gh, data, threshold, now=None, workers=4, deadline_minutes=60, skip_disc
     pending = sorted((i for i in counts if i not in history), key=lambda i: (known[i].get('first_seen') or '', i), reverse=True)[:max_history]
     diagnostic['new_entrants']['history_pending'] = sum(1 for i in counts if i not in history)
     if pending:
-        anchor_at = wall()
-        anchors, anchor_stats = read_counts(gh, pending, workers=workers)  # the anchor is the count seconds before the history read
-        diagnostic['snapshot']['points'] += anchor_stats['points']
-        records = {}
-        for node_id in pending:
-            if node_id not in anchors:
-                continue
-            try:
-                pages = read_pages(gh, anchors[node_id]['full_name'], pages=2)
-                weeks = [w for _, page_weeks, _ in pages for w in page_weeks]
-                records[node_id] = fold(weeks, anchor_at, anchors[node_id]['stars'], pages=len(pages), has_more=pages[-1][2])
-                diagnostic['new_entrants']['history_read'] += 1
-            except GitHubError:
-                diagnostic['new_entrants']['history_failed'] += 1
+        anchor_stats, records = {}, {}
+        for start in range(0, len(pending), 100):  # the anchor is the count seconds before the history read, per batch of 100
+            for node_id, status, anchor_at, anchor, result in anchored_reads(gh, pending[start:start + 100], lambda name: read_pages(gh, name, pages=2), wall,
+                                                                             requests_per_repo=2, stats=anchor_stats):
+                if status == 'ok':
+                    weeks = [w for _, page_weeks, _ in result for w in page_weeks]
+                    records[node_id] = fold(weeks, anchor_at, anchor['stars'], pages=len(result), has_more=result[-1][2])
+                    diagnostic['new_entrants']['history_read'] += 1
+                elif status == 'error':
+                    diagnostic['new_entrants']['history_failed'] += 1
+        diagnostic['snapshot']['points'] += anchor_stats.get('anchor_points', 0)
         if records:
             data.write_history(records)
             history.update(records)

@@ -161,13 +161,34 @@ class DiscoveryTests(unittest.TestCase):
     def test_total_count_and_query_and_plan_helpers(self):
         gh, _ = client(self.world)
         self.assertEqual(total_count(gh, 2000), len(self.above))
-        self.assertEqual(query(2001, 2030), 'stars:2001..2030'); self.assertEqual(query(50000, None), 'stars:>=50000')
+        self.assertEqual(query(2001, 2030), 'stars:2001..2030 fork:true'); self.assertEqual(query(50000, None), 'stars:>=50000 fork:true')
         self.assertEqual(initial_plan(2000), [{'lo': 2001, 'hi': 2030}])
         slices = [{'lo': 2001, 'hi': 2100, 'total': 200, 'status': 'ok'}, {'lo': 2101, 'hi': 2300, 'total': 300, 'status': 'ok'},
                   {'lo': 2301, 'hi': 2400, 'total': 500, 'status': 'ok'}, {'lo': 2401, 'hi': 2600, 'total': 900, 'status': 'split'},
                   {'lo': 2401, 'hi': 2500, 'total': 450, 'status': 'ok'}, {'lo': 2501, 'hi': 2600, 'total': 450, 'status': 'ok'}]
         self.assertEqual(next_plan(slices, 2000), [{'lo': 2001, 'hi': 2300}, {'lo': 2301, 'hi': 2400}, {'lo': 2401, 'hi': 2500}, {'lo': 2501, 'hi': 2600}, {'lo': 2601, 'hi': None}])
 
+    def test_forks_above_the_threshold_are_listed_and_counted_in_the_total(self):
+        forks = sorted(self.above)[::50]
+        for node_id in forks:
+            self.world.repos[node_id]['fork'] = True  # search leaves these out unless the query says fork:true
+        gh, _ = client(self.world)
+        self.assertEqual(total_count(gh, 2000), len(self.above))
+        result = discover(gh, 2000)
+        self.assertEqual(result['status'], 'complete'); self.assertEqual(set(result['repos']), self.above); self.assertTrue(set(forks) <= set(result['repos']))
+
+    def test_incomplete_results_make_the_slice_partial_and_the_total_untrusted(self):
+        gh, _ = client(self.world)
+        plan = discover(gh, 2000)['next_plan']
+        self.world.incomplete.add('page=2&')  # every page 2 timed out on GitHub's side but answered 200
+        gh, _ = client(self.world)
+        result = discover(gh, 2000, slices=plan)
+        self.assertEqual(result['status'], 'partial')
+        partial = [s for s in result['slices'] if s['status'] == 'partial']
+        self.assertTrue(partial); self.assertTrue(all('incomplete_results' in s['error'] and s['pages'] > 1 for s in partial))
+        self.assertEqual(set(result['repos']), self.above)  # the items are kept
+        self.world.incomplete = {'per_page=1&'}  # the total probe
+        self.assertIsNone(total_count(gh, 2000))
 
 if __name__ == '__main__':
     unittest.main()

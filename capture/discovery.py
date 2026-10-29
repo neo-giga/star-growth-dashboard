@@ -1,15 +1,18 @@
 """Find every public repo above the star threshold with REST search, in star-range slices of at most 800 results.
 
 Search caps a query at 1,000 results (page 11 of stars:>2000 answers 422), so the set is listed slice by slice:
-stars:lo..hi, 100 per page, sorted by stars ascending. Page 1 of a slice carries total_count; a slice over the cap is halved
-and both halves are listed. Yesterday's slice boundaries are the starting plan, so a healthy run lists without probing.
+stars:lo..hi fork:true, 100 per page, sorted by stars ascending. Forks are in the set: search leaves them out unless the query
+says fork:true (measured 2026-10-29: stars:>2000 counts 33,891 without it and 34,193 with it; 302 forks). Page 1 of a slice
+carries total_count; a slice over the cap is halved and both halves are listed. Yesterday's slice boundaries are the starting
+plan, so a healthy run lists without probing.
 When search is degraded it answers 502 after about 10 s for 100-result pages while 50- and 30-result pages still succeed
 (measured 2026-10-29 17:40 UTC), so a slice's page 1 probes the page size with two attempts and a failure drops the size
 to the next smaller one for the rest of the run; later pages retry in full at the slice's size (re-listing a slice on a
 later page's failure threw away its fetched pages: 148 wasted requests on 2026-10-29). A slice's pages are read by a few
 workers, and the next slices open while they are in flight, so 10 s answers do not starve the 30-a-minute budget.
 Discovery is best effort: a slice whose pages keep failing is recorded as failed or partial, a deadline leaves later
-slices skipped, and the result says so. The repos found are kept either way.
+slices skipped, and the result says so. The repos found are kept either way. A page answered with incomplete_results (the
+search timed out on GitHub's side) keeps its items but makes its slice partial; such a total_count is not trusted.
 """
 from __future__ import annotations
 import collections, concurrent.futures, math, time
@@ -28,7 +31,7 @@ class Deadline(Exception):
 
 
 def query(lo, hi):
-    return f'stars:>={lo}' if hi is None else f'stars:{lo}..{hi}'
+    return (f'stars:>={lo}' if hi is None else f'stars:{lo}..{hi}') + ' fork:true'
 
 
 def initial_plan(threshold, width=30):
@@ -59,11 +62,12 @@ def next_plan(slices, threshold, target=TARGET_PER_SLICE):
 
 
 def total_count(gh, threshold):
-    """search total_count for stars:>threshold, or None when search cannot answer."""
+    """search total_count for stars:>threshold fork:true, or None when search cannot answer or says its answer is incomplete."""
     try:
-        return gh.search_repositories(f'stars:>{threshold}', page=1, per_page=1)['total_count']
+        answer = gh.search_repositories(f'stars:>{threshold} fork:true', page=1, per_page=1)
     except GitHubError:
         return None
+    return None if answer.get('incomplete_results') else answer['total_count']
 
 
 def transient(error):
@@ -205,6 +209,8 @@ def discover(gh, threshold, slices=None, deadline_seconds=None, clock=time.monot
                     except Exception as error:  # noqa: BLE001 - best effort: a surprise in one page must not lose the repos already found
                         s.errors.append(GitHubError('exception', repr(error)[:200]))
                     else:
+                        if answer.get('incomplete_results'):
+                            s.errors.append(GitHubError('incomplete', 'incomplete_results: true', query(s.lo, s.hi)))
                         if page == 1 and not s.relist:
                             state['proven'] = True
                             on_page_1(pool, s, answer)

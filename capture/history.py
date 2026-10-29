@@ -13,10 +13,16 @@ gain over a window that starts inside the history = history days from the window
 from __future__ import annotations
 import datetime as dt
 import zoneinfo
+from .github import GitHubError
+from .snapshot import read_counts
 
 PACIFIC = zoneinfo.ZoneInfo('America/Los_Angeles')
 WINDOWS = (1, 7, 15, 30, 90, 180, 365)
 WEEKS_PER_PAGE = 30
+# A star given between a repo's anchor and its history read is counted twice (in the history and in today - anchor), so the
+# read starts and ends at most this long after the anchor, or the repo is anchored again. Batches run ~25 s (measured 2026-10-29:
+# 16 s median, 33 s max from anchor to page 1 on 1,878 repos).
+MAX_ANCHOR_AGE = 120
 
 
 def pacific_date(instant):
@@ -38,6 +44,50 @@ def read_pages(gh, full_name, pages=2, first_page=1):
         if not has_next:
             break
     return out
+
+
+def anchored_reads(gh, batch, read, wall, requests_per_repo=1, max_age=MAX_ANCHOR_AGE, stats=None):
+    """Read one batch (at most 100 node IDs) of histories next to their anchors. Yields (node_id, status, anchor_at, anchor, result):
+    'ok' (result = read(full_name)), 'missing' (the anchor query answered null: deleted or private), 'failed' (the anchor query
+    itself failed after its retries: unread, try again later) or 'error' (read raised GitHubError, the result).
+    The batch's core budget is waited for before its anchors are read, so a throttle wait never sits between an anchor and its
+    read; a repo whose read would start, or did end, more than max_age after its anchor is anchored again (and read again, once).
+    stats (a dict) collects anchor_points and anchor_queries."""
+    stats = stats if stats is not None else {}
+    gh.wait_core(len(batch) * requests_per_repo)
+    state = {'at': None, 'rows': {}, 'failed': set()}
+
+    def anchor(ids):
+        failed = []
+        state['at'] = wall()
+        state['rows'], counted = read_counts(gh, ids, workers=1, failed=failed)
+        state['failed'] = set(failed)
+        stats['anchor_points'] = stats.get('anchor_points', 0) + counted['points']
+        stats['anchor_queries'] = stats.get('anchor_queries', 0) + counted['queries']
+
+    def stale():
+        return state['at'] is None or (wall() - state['at']).total_seconds() > max_age
+
+    for k, node_id in enumerate(batch):
+        for attempt in (1, 2):
+            if stale():
+                anchor(batch[k:])
+            if node_id in state['failed']:
+                yield node_id, 'failed', state['at'], None, None
+                break
+            row = state['rows'].get(node_id)
+            if row is None:
+                yield node_id, 'missing', state['at'], None, None
+                break
+            try:
+                result = read(row['full_name'])
+            except GitHubError as error:
+                yield node_id, 'error', state['at'], row, error
+                break
+            if attempt == 1 and stale():
+                continue  # the read outlasted the bound (retry waits): anchor again and read again
+            yield node_id, 'ok', state['at'], row, result
+            break
 
 
 def fold(weeks, anchor_at, anchor_stars, pages, has_more):

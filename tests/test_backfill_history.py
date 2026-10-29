@@ -4,7 +4,7 @@ import datetime as dt, importlib.util, io, json, pathlib, shutil, sys, tempfile,
 from unittest import mock
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from capture.github import GitHub
-from capture.history import WINDOWS, pacific_date
+from capture.history import WINDOWS, fold, pacific_date
 from capture.store import DataDir, shard_of
 from capture.windows import build_page
 from fake_github import FakeClock, make_world
@@ -107,8 +107,8 @@ class BackfillTests(unittest.TestCase):
         self.assertTrue(all(w['source'] == 'history' for w in page['windows']))
         for row, node_id in enumerate(page['columns']['node_id']):
             for days in WINDOWS:
-                want = self.world.gained(node_id, date - dt.timedelta(days=days - 1), date, NOW) + counts[node_id] - self.world.stars(node_id, NOW)
-                self.assertEqual(page['columns'][f'gain_{days}d'][row], want, (node_id, days))
+                want = counts[node_id] - self.world.stars(node_id, capture - dt.timedelta(days=days))  # the truth over the N x 24 h before the capture
+                self.assertLessEqual(abs(page['columns'][f'gain_{days}d'][row] - want), 1, (node_id, days))  # the start day pro rata: rounding only
         self.assertEqual(page['columns']['history_mask'], [127] * page['row_count'])
 
     def test_cli_writes_the_sample_the_journal_and_the_request_log_then_compacts(self):
@@ -128,6 +128,110 @@ class BackfillTests(unittest.TestCase):
             self.assertEqual(backfill_history.main(['--data-dir', str(self.data.root), '--work-dir', str(work), '--compact']), 0)
         self.assertIn('compacted 30 repos', again.getvalue())
 
+    def test_a_throttle_wait_never_sits_between_an_anchor_and_its_history_read(self):
+        # Codex finding 2: the world moves while the backfill waits for its budget, so a stale anchor would count stars twice.
+        clock = FakeClock()
+        at = lambda: NOW + dt.timedelta(seconds=clock.t - 1000)
+        def fetch(*args):
+            self.world.now = at()
+            return self.world.fetch(*args)
+        gh = GitHub('t', fetch=fetch, sleeper=clock.sleep, clock=clock, wall=lambda: at().timestamp(), max_attempts=3, core_per_hour=120)
+        targets = {i: self.targets[i] for i in sorted(self.targets)[:150]}
+        journal = backfill_history.Journal(self.tmp / 'work/journal.jsonl')
+        stats = backfill_history.backfill(gh, journal, targets, pages=1, log=lambda *_: None, wall=at)
+        self.assertEqual(stats['page1_read'], 150); self.assertTrue(any(s > 3000 for s in clock.sleeps))  # the second batch waited for the budget
+        moved = 0
+        for node_id in targets:
+            entry = journal.entries[(node_id, 1)]
+            anchor_at = dt.datetime.fromisoformat(entry['anchor_at'])
+            record = fold(entry['weeks'], anchor_at, entry['anchor_stars'], pages=1, has_more=entry['has_next'])
+            through = dt.date.fromisoformat(record['through'])
+            self.assertEqual(record['days'][-1], self.world.day_count(node_id, through, anchor_at), node_id)  # the anchor day holds no star given after the anchor
+            if not entry['has_next']:
+                self.assertEqual(sum(record['days']), entry['anchor_stars'], node_id)
+            moved += self.world.day_count(node_id, through, anchor_at) != self.world.day_count(node_id, through, anchor_at + dt.timedelta(hours=1))
+        self.assertGreater(moved, 10)  # stars do arrive within the hour a stale anchor would have waited
+
+    def test_a_read_that_outlasts_the_anchor_bound_is_anchored_and_read_again(self):
+        clock = FakeClock()
+        at = lambda: NOW + dt.timedelta(seconds=clock.t - 1000)
+        def fetch(*args):
+            self.world.now = at()
+            return self.world.fetch(*args)
+        gh = GitHub('t', fetch=fetch, sleeper=clock.sleep, clock=clock, wall=lambda: at().timestamp(), max_attempts=8)
+        targets = {i: self.targets[i] for i in sorted(self.targets)[:20]}
+        slow = targets[sorted(targets)[5]]
+        self.world.flaky[slow + '/'] = 7  # 7 answers of 502: 197 s of retry waits inside one read
+        journal = backfill_history.Journal(self.tmp / 'work/journal.jsonl')
+        stats = backfill_history.backfill(gh, journal, targets, pages=1, log=lambda *_: None, wall=at)
+        self.assertEqual(stats['page1_read'], 20)
+        reads = {}
+        for _, url, instant in self.world.requests:
+            if 'stargazers/history' in url:
+                reads[url.split('/repos/')[1].split('/stargazers')[0]] = instant
+        for node_id, full_name in targets.items():
+            entry = journal.entries[(node_id, 1)]
+            age = (reads[full_name] - dt.datetime.fromisoformat(entry['anchor_at'])).total_seconds()
+            self.assertTrue(0 <= age <= 120, (full_name, age))  # capture.history.MAX_ANCHOR_AGE
+        self.assertEqual(stats.get('anchor_queries'), 2)  # the batch's anchor, then the rest of the batch again after the slow read
+
+    def test_a_resumed_run_counts_the_last_hour_of_requests_log_against_the_budget(self):
+        log_path = self.tmp / 'work/requests.log'; log_path.parent.mkdir(parents=True)
+        def log_request(entry):  # what main() writes
+            with open(log_path, 'a') as handle:
+                handle.write(json.dumps(entry) + '\n')
+        journal = backfill_history.Journal(self.tmp / 'work/journal.jsonl')
+        backfill_history.backfill(self.gh(core_per_hour=40, request_log=log_request), journal, self.targets, stop=lambda: len(self.history_urls()) >= 40,
+                                  log=lambda *_: None, wall=lambda: self.world.now)
+        first_run = [json.loads(l) for l in log_path.read_text().splitlines()]
+        self.assertEqual(sum(1 for e in first_run if 'stargazers/history' in e['url']), 40)  # stopped at the cap
+        gh = self.gh(core_per_hour=40, request_log=log_request)  # resumed at once
+        self.assertEqual(backfill_history.restore_budget(gh, log_path), 40)
+        backfill_history.backfill(gh, backfill_history.Journal(self.tmp / 'work/journal.jsonl'), self.targets, stop=lambda: len(self.history_urls()) >= 45,
+                                  log=lambda *_: None, wall=lambda: self.world.now)
+        oldest = min(dt.datetime.fromisoformat(e['at']) for e in first_run if 'stargazers/history' in e['url'])
+        resumed = [dt.datetime.fromisoformat(e['at']) for e in [json.loads(l) for l in log_path.read_text().splitlines()][len(first_run):]]
+        self.assertTrue(resumed); self.assertGreaterEqual(min(resumed), oldest + dt.timedelta(hours=1))  # 0 requests until the oldest aged out
+
+    def test_a_failed_anchor_query_is_retried_on_resume_and_only_a_null_node_is_missing(self):
+        targets = {i: self.targets[i] for i in sorted(self.targets)[:150]}
+        self.world.flaky['/graphql'] = 3  # the first batch's anchor query fails after its 3 attempts
+        self.world.repos[sorted(targets)[120]]['gone'] = True  # a real null node in the second batch
+        journal = backfill_history.Journal(self.tmp / 'work/journal.jsonl')
+        stats = backfill_history.backfill(self.gh(), journal, targets, pages=1, log=lambda *_: None, wall=lambda: self.world.now)
+        self.assertEqual((stats['errors'], stats['missing'], stats['page1_read']), (100, 1, 49))
+        self.assertFalse(any(journal.done(i, 1) for i in sorted(targets)[:100])); self.assertTrue(journal.done(sorted(targets)[120], 1))
+        stats = backfill_history.backfill(self.gh(), backfill_history.Journal(self.tmp / 'work/journal.jsonl'), targets, pages=1, log=lambda *_: None, wall=lambda: self.world.now)
+        self.assertEqual((stats['page1_read'], stats['errors'], stats['missing']), (100, 0, 0))
+
+    def test_a_week_rollover_between_page_1_and_page_2_leaves_no_gap(self):
+        # Codex finding 9 is not real: weeks are listed newest first, so a new week shifts page 2 one week newer (it overlaps
+        # page 1 by a week, which fold de-duplicates); a gap cannot appear. The record keeps the truth day by day.
+        saturday = dt.datetime(2026, 3, 14, 18, 0, tzinfo=dt.timezone.utc)
+        self.world.now = saturday
+        journal = backfill_history.Journal(self.tmp / 'work/journal.jsonl')
+        backfill_history.backfill(self.gh(), journal, self.targets, pages=1, log=lambda *_: None, wall=lambda: self.world.now)
+        self.world.now = saturday + dt.timedelta(days=3)  # Tuesday: the newest week is now the one of Sunday 03-15
+        journal = backfill_history.Journal(self.tmp / 'work/journal.jsonl')
+        stats = backfill_history.backfill(self.gh(), journal, self.targets, log=lambda *_: None, wall=lambda: self.world.now)
+        self.assertGreater(stats['page2_read'], 100)
+        backfill_history.compact(journal, self.data)
+        for node_id, record in self.data.read_history_all().items():
+            anchor_at, start = dt.datetime.fromisoformat(record['anchor_at']), dt.date.fromisoformat(record['start'])
+            truth = [self.world.day_count(node_id, start + dt.timedelta(days=i), anchor_at) for i in range(len(record['days']))]
+            self.assertEqual(record['days'], truth, node_id)
+            if record['has_more']:
+                self.assertGreaterEqual((dt.date.fromisoformat(record['through']) - start).days, 365)
+
+    def test_a_torn_tail_is_cut_before_the_next_line_is_appended(self):
+        path = self.tmp / 'work/journal.jsonl'
+        backfill_history.Journal(path).add({'node_id': 'a', 'page': 1, 'status': 'ok'})
+        with open(path, 'a') as handle:
+            handle.write('{"node_id": "b", "page": 1, "stat')  # kill -9 mid-write
+        torn = backfill_history.Journal(path)
+        self.assertEqual(set(torn.entries), {('a', 1)})
+        torn.add({'node_id': 'c', 'page': 1, 'status': 'ok'})
+        self.assertEqual(set(backfill_history.Journal(path).entries), {('a', 1), ('c', 1)})
 
 if __name__ == '__main__':
     unittest.main()

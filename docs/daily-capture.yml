@@ -60,9 +60,12 @@ jobs:
         if: always()
         run: |
           cd data-branch
+          # One identity for every commit this step makes, the cherry-pick that replays it on a moved tip included.
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add -A
           if git diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
-          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -q -m "capture $(date -u +%F)"
+          git commit -q -m "capture $(date -u +%F)"
           ours=$(git rev-parse HEAD)
           for attempt in 1 2 3; do
             if git push origin HEAD:refs/heads/data; then exit 0; fi

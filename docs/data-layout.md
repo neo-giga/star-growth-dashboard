@@ -2,7 +2,8 @@
 
 An orphan branch, written once a day by `.github/workflows/daily-capture.yml` (`scripts/daily_capture.py`) and once by the
 one-time backfill (`scripts/backfill_history.py`, run on a Mac with a personal token). Nothing on `main` reads it yet; the
-page will, through `windows/latest.json`, which is the interface described last and in most detail.
+page will, through `windows/latest.json`, which is the interface described last and in most detail. Forks are in the set:
+every search query says `fork:true` (34,193 repositories above 2,000 stars on 2026-10-29, 302 of them forks).
 
 All dates are **US Pacific calendar dates**: GitHub's star history is bucketed by Pacific day (measured 2026-10-29), and the
 daily capture runs at 05:30 UTC, i.e. 22:30 PDT / 21:30 PST, so a snapshot is dated the Pacific day it ends.
@@ -40,8 +41,10 @@ columnar or one row per line, ~141 MiB a year).
 
 A record holds `days` from `start` (a Sunday) to `through` inclusive, where `through` is the Pacific date of `anchor_at`.
 `anchor_stars` is the repo's total read by GraphQL seconds before its history pages, so the `through` day is partial (the
-stars given before the anchor) and the anchor is the exact total at that instant. `pages` is how many pages were read and
-`has_more` whether older weeks exist beyond `start` (they were not read). Sum of `days` = `anchor_stars` when `has_more` is
+stars given before the anchor) and the anchor is the exact total at that instant. A batch of 100 waits for its request budget
+before its anchor is read, never between the anchor and the reads, and a read that starts or ends more than 120 s after its
+anchor is anchored and read again (`MAX_ANCHOR_AGE`): a star given in between would be counted twice. `pages` is how many
+pages were read and `has_more` whether older weeks exist beyond `start` (they were not read). Sum of `days` = `anchor_stars` when `has_more` is
 false (measured exact on 44 of 50 real repos, within 1 star on the other 6).
 
 ## `windows/latest.json`: the interface
@@ -74,17 +77,23 @@ false (measured exact on 44 of 50 real repos, within 1 star on the other 6).
 
 - **Columnar**: every array in `columns` has `row_count` entries; row *i* is one repo. Rows are the known repos whose count
   on `date` is above `threshold`, sorted by `stars` descending. A repo whose count could not be read that day is absent.
-- **A gain over N days is the stars gained in the N days ending at the capture** (`generated_at`), per row:
-  - `source: snapshot`: today's count minus the count in the newest snapshot dated on or before `date - N`
-    (`baseline_date`; it is exactly `date - N` unless that day's run failed). Exact net change, unstars included.
-  - `source: history`: the history days from `date - N + 1` through the repo's anchor day, plus today's count minus the
-    anchor count. Exact to the minutes between the anchor and its history read; stars given in the window and later
-    removed are not counted (GitHub removes them from the history).
-  - A window's `source` is `snapshot` once `first_snapshot_date` is at least N days old; `exact_since` is the date that
-    happens (`first_snapshot_date + N`), in the past for snapshot windows. The whole column flips on that day.
+- **A gain over N days is the stars gained in the N × 24 hours ending at the capture** (`generated_at`), per row:
+  - `source: snapshot`: today's count minus the count in the snapshot dated `date - N` (`baseline_date`), which the UTC
+    cron captured N × 24 h earlier. Exact net change, unstars included. If that day's run failed, no older snapshot stands
+    in (it would label a longer interval as N days): the window's `source` is `history` and `baseline_date` null that day.
+  - `source: history`: the same interval from the history: the Pacific day holding the window start counted pro rata from
+    that instant (its 23, 24 or 25 hours), the later days through the repo's anchor day, plus today's count minus the anchor
+    count; kept within 0 and `stars`. Both sources cover the same instants, so a column does not jump when it flips
+    (simulated at a constant 10 stars an hour, PDT, PST and across 2026-11-01: within 1 star). Stars given in the window and
+    later removed are not counted (GitHub removes them from the history).
+  - A window's `source` is `snapshot` when the snapshot dated `date - N` exists; `exact_since` is `first_snapshot_date + N`.
+    The whole column flips on that day.
   - A row that the column's source cannot serve falls back to the other source: a repo discovered after the baseline
     snapshot uses history, and sets bit *i* of its `history_mask` (bit 0 = 1 d … bit 6 = 365 d; `127` = every window from
-    history). A row neither source can serve (no history yet, or the window starts before the two pages read) is `null`.
+    history). A row neither source can serve (no history yet, an anchor older than the window start, or the window starting
+    before the two pages read) is `null`.
+  - History-sourced cells satisfy 0 ≤ `gain_1d` ≤ `gain_7d` ≤ … ≤ `gain_365d` ≤ `stars`; snapshot-sourced cells may be
+    negative (unstars) and are never above `stars`.
     `rows_snapshot`, `rows_history` and `rows_null` per window count these.
 - `node_id` is GitHub's GraphQL node ID: stable across renames (`full_name` follows the rename).
 - `language` is the primary language or null; `created_at` is GitHub's ISO instant.
@@ -99,7 +108,7 @@ false (measured exact on 44 of 50 real repos, within 1 star on the other 6).
 | step | requests | time |
 |---|---|---|
 | discovery, search healthy: ~60 slices of ≤ 800, 100 per page, 30 search requests/min | ~450–600 search | 15–20 min (research estimate; search was degraded all afternoon) |
-| discovery, search degraded (every 100- and 50-result page 502 after ~10 s, half of the 30-result pages): 30 per page, 8 workers, pipelined slices | ~2,000 search at 29/min | ~340–400 repos/min, ~95 min for 33,889 repos |
+| discovery, search degraded (every 100- and 50-result page 502 after ~10 s, half of the 30-result pages): 30 per page, 8 workers, pipelined slices | ~2,000 search at 29/min | ~340–400 repos/min, ~95 min for 33,889 repos (forks excluded then; 34,193 with them) |
 | snapshot: `nodes(ids:)`, 100 per query, 4 workers | 320 points for 31,933 repos | 213 s, 0 failed queries |
 | history for repos that lack it (today's entrants first), 2 pages each, ≤ 400 repos a day | ≤ 800 core | < 5 min |
 | backfill (once, on the Mac): 2 pages × ~34k repos, ≤ 3,000 core/h, plus 1 anchor point per 100 repos | ~66k core + ~340 points | ~22 h, resumable (200 repos: 391 requests in 1.9 min) |

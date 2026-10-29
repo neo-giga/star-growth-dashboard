@@ -98,6 +98,31 @@ class GitHub:
                 wait = self.core_times[0] + 3600 - now + 0.01
             self._wait(wait, url)
 
+    def wait_core(self, n):
+        """Wait until n more core requests fit in the sliding hour, without taking them: work that must not stall halfway (a
+        batch's anchors and its history reads) waits here, before it starts."""
+        if not self.core_per_hour:
+            return
+        n = min(n, self.core_per_hour)
+        while True:
+            with self.lock:
+                now = self.clock()
+                while self.core_times and self.core_times[0] <= now - 3600:
+                    self.core_times.popleft()
+                excess = len(self.core_times) + n - self.core_per_hour
+                if excess <= 0:
+                    return
+                wait = self.core_times[excess - 1] + 3600 - now + 0.01
+            self._wait(wait, 'core budget')
+
+    def restore_core(self, ages):
+        """Count core requests made before this client existed (each `age` seconds ago, e.g. by the run a resume continues)
+        against core_per_hour, so a restart does not get a fresh hour."""
+        now = self.clock()
+        with self.lock:
+            self.core_times.extend(sorted(now - age for age in ages if 0 <= age < 3600))
+            return len(self.core_times)
+
     # -- requests -----------------------------------------------------------------------------------------------------
     def _request(self, method, url, body=None, resource='core', attempts=None):
         attempts = attempts or self.max_attempts
