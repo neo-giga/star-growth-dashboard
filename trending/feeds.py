@@ -232,15 +232,18 @@ def collect_feed(client, period, limit=100, max_pages=1000, first_page=1, keep_f
                 failure = f'{stop}: {type(exc).__name__}: {str(exc)[:200]}'
             if failure:
                 break
+            if read_pages and page >= math.ceil(read_pages[max(read_pages)]['total'] / limit):
+                break  # the provider's last page by its latest total: nothing follows it; its re-queued read decides whether the end was reached
         except ValueError as exc:
             failure = f'{type(exc).__name__}: {str(exc)[:200]}'
             break
     for page in requeued:
-        if failure:
+        if failure or (reached_end and page > max(read_pages)):
             break
         started_page = clock()
         try:
-            read(page)
+            if not read(page):
+                reached_end = True
         except (ValueError, *TRANSIENT) as exc:
             failure = f'page {page} failed again after re-queue: {type(exc).__name__}: {str(exc)[:200]}'
             failed(started_page)

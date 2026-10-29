@@ -362,6 +362,45 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(r['fetched_started_at'], times[0])
         self.assertEqual(r['fetched_at'], times[1])
 
+    def test_requeued_last_page_that_reads_fine_reaches_the_end(self):
+        # Bugbot on full-lists r2: a re-queued last page's successful read ignored hasMore, so the window stayed partial.
+        error = HTTPError('https://example.invalid', 503, 'unavailable', {}, None)
+        c, f = client(page([repo(1)], total=2, pages=2, more=True, limit=1), error, page([repo(2)], number=2, total=2, pages=2, limit=1), max_attempts=1)
+        result = collect_feed(c, 'week', limit=1, max_pages=2, requeue=True)
+        self.assertEqual((result['coverage']['status'], result['coverage']['reached_end'], result['coverage']['failure'], result['coverage']['requeued_pages']), ('complete', True, None, [2]))
+        self.assertEqual([r['repo_id'] for r in result['rows']], [1, 2])
+        self.assertEqual([u.split('page=')[1][0] for u in f.urls], ['1', '2', '2'])
+
+    def test_failed_last_page_is_requeued_without_reading_past_the_end(self):
+        # The last page fails once and every page past it always fails: pages after the provider's last page are never read, so
+        # their failures cannot trip the three-in-a-row stop.
+        pages = {1: page([repo(1)], total=2, pages=2, more=True, limit=1), 2: page([repo(2)], number=2, total=2, pages=2, limit=1)}
+        reads = []
+        def fetch(url):
+            number = int(url.split('page=')[1].split('&')[0]); reads.append(number)
+            if number > 2 or reads.count(2) == 1:
+                raise HTTPError(url, 503, 'unavailable', {}, None)
+            return copy.deepcopy(pages[number])
+        result = collect_feed(FeedClient(fetch=fetch, sleeper=lambda _: None, max_attempts=1), 'week', limit=1, requeue=True)
+        self.assertEqual((result['coverage']['status'], result['coverage']['reached_end'], result['coverage']['failure'], result['coverage']['requeued_pages']), ('complete', True, None, [2]))
+        self.assertEqual(reads, [1, 2, 2])
+
+    def test_requeued_last_page_failing_again_still_fails_the_window(self):
+        error = HTTPError('https://example.invalid', 503, 'unavailable', {}, None)
+        c, f = client(page([repo(1)], total=2, pages=2, more=True, limit=1), error, error, error, error, max_attempts=1)
+        result = collect_feed(c, 'week', limit=1, requeue=True)
+        self.assertEqual((result['coverage']['status'], result['coverage']['reached_end']), ('partial', False))
+        self.assertRegex(result['coverage']['failure'], '^page 2 failed again after re-queue: HTTPError')
+        self.assertEqual([u.split('page=')[1][0] for u in f.urls], ['1', '2', '2'])
+
+    def test_requeued_pages_past_a_shrunken_end_are_not_reread(self):
+        # The total shrank while pages 2 and 3 failed: page 2's re-read reports the end, so page 3 is beyond it and is not read.
+        error = HTTPError('https://example.invalid', 503, 'unavailable', {}, None)
+        c, f = client(page([repo(1)], total=3, pages=3, more=True, limit=1), error, error, page([repo(2)], number=2, total=2, pages=2, limit=1), max_attempts=1)
+        result = collect_feed(c, 'week', limit=1, max_pages=3, requeue=True)
+        self.assertEqual((result['coverage']['reached_end'], result['coverage']['failure'], result['coverage']['requeued_pages']), (True, None, [2, 3]))
+        self.assertEqual([u.split('page=')[1][0] for u in f.urls], ['1', '2', '3', '2'])
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -532,3 +532,14 @@ class IndependentWindowTests(unittest.TestCase):
   day=data['feeds'][0];tail=day['coverage']['reads'][-1]
   self.assertRegex(day['coverage']['not_refreshed_reason'],'^day refresh not publishable: tail 1294 s spent on failed pages \\(cap 1200 s\\)')  # 4 pages x (6 x 15.6 + 230) s
   self.assertEqual(tail['requeued_pages'],[30,32,34,36]);self.assertEqual(max(n for t,n in p.pages if t=='day'),35)
+ def test_a_failed_last_tail_page_is_requeued_and_the_window_publishes(self):
+  # Bugbot on r2: the day tail's last page (122 of 12,195 rows) fails once; pages past it answer errors. The window must publish.
+  p=Provider(12195);seen={}
+  def fetch(url):
+   q=dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query));key=(q['time'],int(q['page']));seen[key]=seen.get(key,0)+1
+   if q['time']=='day' and (key[1]>122 or (key[1]==122 and seen[key]<=6)):raise urllib.error.HTTPError(url,503,'Service Unavailable',{},None)
+   return p(url)
+  data=w.refresh_dashboard(prior(2000),client_factory=lambda **kw:FeedClient(fetch=fetch,**kw),sleeper=lambda s:None,depth='all')
+  day=data['feeds'][0];tail=day['coverage']['reads'][-1]
+  self.assertEqual((day['coverage']['refreshed'],day['coverage'].get('not_refreshed_reason'),len(day['rows'])),(True,None,12195));self.assertTrue(day['coverage']['reached_end'])
+  self.assertEqual((tail['requeued_pages'],tail['retries'],tail['failure']),([122],5,None));self.assertEqual(max(n for t,n in p.pages if t=='day'),122)
