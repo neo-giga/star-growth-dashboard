@@ -3,10 +3,11 @@
 The gate fails closed (the run goes red, nothing is deployed, the current page stays) when the file is older than MAX_AGE_HOURS,
 when `row_count` is under COVERAGE_FLOOR of the search total in that day's diagnostic, or when any gain column is null for more
 than NULL_CEILING of the rows. The staged site is the checkout's UI sources (hashed by scripts/build_static_release.py) plus the
-page file (the columnar interface without the node IDs) and the agent feed under api/v2. Nothing is committed to git.
+page file (the columnar interface without the node IDs) and the agent feed under api/v2, plus the previous publication's hashed
+script, stylesheet and data files (one generation) so a page loaded before the deploy still finds them. Nothing is committed to git.
 """
 from __future__ import annotations
-import datetime as dt, json, pathlib, shutil, subprocess, sys, tempfile
+import datetime as dt, json, pathlib, re, shutil, subprocess, sys, tempfile, urllib.parse, urllib.request
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from capture.history import WINDOWS
 from capture.windows import PAGE_SCHEMA, column
@@ -19,6 +20,8 @@ NULL_CEILING = 0.01
 GAIN_COLUMNS = tuple(column(days) for days in WINDOWS)
 COLUMN_NAMES = ('node_id', 'full_name', 'language', 'created_at', 'stars', *GAIN_COLUMNS, 'history_mask')
 PUBLIC_SOURCE_FILES = ('.nojekyll', 'llms.txt', 'docs/agent-feed.md', 'docs/publish-page.yml')
+HASHED_ASSET = re.compile(r'(?:app|style|data(?:-[a-z]+)?)\.[0-9a-f]{16}\.(?:js|css|json)')
+MAX_ASSET_BYTES = 64 * 1024 * 1024
 
 
 class GateRefused(Exception):
@@ -67,6 +70,13 @@ def validate_windows(doc):
             raise ValueError(f'column {name} must hold integers or null')
     if any(type(value) is not int for value in columns['stars']) or any(type(value) is not int for value in columns['history_mask']):
         raise ValueError('stars and history_mask must hold integers')
+    if any(not isinstance(value, str) or not value for value in columns['node_id']):
+        raise ValueError('every node_id must be a nonempty string')
+    if len(set(columns['node_id'])) != count:
+        raise ValueError(f'node_id repeats: {count - len(set(columns["node_id"]))} rows duplicate another')
+    below = sum(1 for value in columns['stars'] if value <= doc['threshold'])
+    if below:
+        raise ValueError(f'{below} rows have stars at or below the threshold {doc["threshold"]}')
     return doc
 
 
@@ -140,9 +150,36 @@ def copy_public_site(site, stage):
             shutil.copyfile(path, stage / name)
 
 
-def stage_site(site_dir, data_dir, output_dir, now=None, ignore_gate=False):
+def read_previous(source, name):
+    """The bytes of `name` in the previous publication: the live site (an https URL) or a staged site directory."""
+    if str(source).startswith('https://'):
+        request = urllib.request.Request(urllib.parse.urljoin(str(source), name), headers={'Cache-Control': 'no-cache'})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            data = response.read(MAX_ASSET_BYTES + 1)
+        if len(data) > MAX_ASSET_BYTES:
+            raise ValueError(f'{name} is over {MAX_ASSET_BYTES} bytes')
+        return data
+    return (pathlib.Path(source) / name).read_bytes()
+
+
+def previous_generation(source):
+    """{name: bytes} of the hashed script, stylesheet and data files the previous publication's index.html serves, so a cached
+    index.html or an already-loaded script still finds them during the deploy. Only that one generation is carried: the next deploy
+    carries this one's, never older ones."""
+    html = read_previous(source, 'index.html').decode('utf-8')
+    carried = {name: read_previous(source, name) for name in re.findall(r'(?:src|href)="([^"]+)"', html) if HASHED_ASSET.fullmatch(name)}
+    for script in [name for name in carried if name.endswith('.js')]:
+        for name in re.findall(rf"'({HASHED_ASSET.pattern})'", carried[script].decode('utf-8')):
+            if name.endswith('.json'):
+                carried[name] = read_previous(source, name)
+    return carried
+
+
+def stage_site(site_dir, data_dir, output_dir, now=None, ignore_gate=False, previous=None):
     """Stage the site under output_dir (a new directory) from the data branch checkout, or raise GateRefused / ValueError.
-    ignore_gate stages whatever the file holds (local previews only; the workflow never passes it): the problems are returned, not raised."""
+    ignore_gate stages whatever the file holds (local previews only; the workflow never passes it): the problems are returned, not raised.
+    previous: the previous publication (the live site's https URL or a staged site directory) whose hashed assets are carried; when it cannot be read
+    nothing is carried and the result says why (the first deploy has none; a missing courtesy copy never blocks a deploy)."""
     site, output = pathlib.Path(site_dir).resolve(), pathlib.Path(output_dir).resolve()
     if output.exists() or output == site or site in output.parents:
         raise ValueError('output must be a new directory outside the checkout')
@@ -151,9 +188,17 @@ def stage_site(site_dir, data_dir, output_dir, now=None, ignore_gate=False):
     problems, measurements = gate(doc, diagnostic, now or dt.datetime.now(dt.timezone.utc))
     if problems and not ignore_gate:
         raise GateRefused(problems, measurements)
+    carried, previous_note = {}, None
+    if previous is not None:
+        try:
+            carried = previous_generation(previous)
+        except Exception as exc:  # noqa: BLE001 - reported in the result, never hidden
+            previous_note = f'previous generation unreadable from {previous}: {type(exc).__name__}: {str(exc)[:200]}; none carried'
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix='.publish-', dir=output.parent) as temp:
         temp = pathlib.Path(temp); stage = temp / 'site'; stage.mkdir(); copy_public_site(site, stage)
+        for name, data in carried.items():
+            (stage / name).write_bytes(data)
         catalog = build_agent_feed(doc, stage)
         source = temp / 'ui'; source.mkdir()
         for name, text in ui.items():
@@ -169,4 +214,5 @@ def stage_site(site_dir, data_dir, output_dir, now=None, ignore_gate=False):
         shutil.move(str(stage), str(output))
     return {'output': str(output), 'date': doc['date'], 'generated_at': doc['generated_at'], 'row_count': doc['row_count'], 'threshold': doc['threshold'],
             'windows': [{k: w.get(k) for k in ('column', 'source', 'exact_since', 'rows_snapshot', 'rows_history', 'rows_null')} for w in doc['windows']],
-            'measurements': measurements, 'gate_ignored': sorted(problems) if ignore_gate else [], 'page_file_bytes': len(encoded), 'artifact_bytes': total, 'snapshot_id': catalog['snapshot_id']}
+            'measurements': measurements, 'gate_ignored': sorted(problems) if ignore_gate else [], 'page_file_bytes': len(encoded), 'artifact_bytes': total, 'snapshot_id': catalog['snapshot_id'],
+            'previous_generation': sorted(carried), 'previous_generation_note': previous_note}

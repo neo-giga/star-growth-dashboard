@@ -43,6 +43,17 @@ class GateTests(unittest.TestCase):
             with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
                 st.validate_windows(doc)
 
+    def test_an_empty_or_repeated_node_id_or_stars_at_or_below_the_threshold_is_refused_before_upload(self):
+        empty, repeated, below = copy.deepcopy(FIXTURE), copy.deepcopy(FIXTURE), copy.deepcopy(FIXTURE)
+        empty['columns']['node_id'][7] = ''; repeated['columns']['node_id'][7] = repeated['columns']['node_id'][3]; below['columns']['stars'][7] = FIXTURE['threshold']
+        for name, doc, message in (('empty', empty, 'nonempty string'), ('repeated', repeated, 'node_id repeats: 1 rows'), ('below', below, '1 rows have stars at or below the threshold 2000')):
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                with self.assertRaisesRegex(ValueError, message):
+                    st.validate_windows(doc)
+                with self.assertRaisesRegex(ValueError, message):
+                    st.stage_site(checkout(tmp), data_dir(tmp, doc), pathlib.Path(tmp) / 'out', now=NOW, ignore_gate=True)
+                self.assertFalse((pathlib.Path(tmp) / 'out').exists())
+
     def test_a_file_older_than_36_hours_is_refused(self):
         problems, measured = st.gate(FIXTURE, diagnostic(), dt.datetime.fromisoformat(FIXTURE['generated_at']) + dt.timedelta(hours=36, minutes=1))
         self.assertEqual(len(problems), 1); self.assertIn('over 36 h', problems[0]); self.assertEqual(measured['age_hours'], 36.02)
@@ -153,6 +164,37 @@ class StageTests(unittest.TestCase):
             shutil.rmtree(out); st.stage_site(site, data_dir(tmp, doc, name='data2'), out, now=NOW)
             names = sorted(p.name for p in out.iterdir())
             self.assertIn(css, names); self.assertNotIn(app, names); self.assertNotIn(data_name, names)
+
+    def test_the_previous_generation_is_carried_for_one_deploy_and_no_older_one(self):
+        def assets(out):
+            html = (out / 'index.html').read_text(); app = re.search(r'<script[^>]+src="([^"]+)"', html)[1]
+            return app, re.search(r'href="([^"]+\.css)"', html)[1], re.search(r"'(data\.[0-9a-f]{16}\.json)'", (out / app).read_text())[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp); site = checkout(tmp); docs = [copy.deepcopy(FIXTURE) for _ in range(3)]
+            for i, doc in enumerate(docs):
+                doc['columns']['stars'][0] += i
+            first = st.stage_site(site, data_dir(tmp, docs[0], name='d0'), tmp / 'out0', now=NOW)
+            self.assertEqual(first['previous_generation'], [])
+            second = st.stage_site(site, data_dir(tmp, docs[1], name='d1'), tmp / 'out1', now=NOW, previous=tmp / 'out0')
+            old, new = assets(tmp / 'out0'), assets(tmp / 'out1')
+            self.assertNotEqual(old[0], new[0]); self.assertNotEqual(old[2], new[2])
+            self.assertEqual(second['previous_generation'], sorted(old)); self.assertIsNone(second['previous_generation_note'])
+            for name in old:  # a cached index.html or an already-loaded script still finds its files
+                self.assertEqual((tmp / 'out1' / name).read_bytes(), (tmp / 'out0' / name).read_bytes(), name)
+            st.stage_site(site, data_dir(tmp, docs[2], name='d2'), tmp / 'out2', now=NOW, previous=tmp / 'out1')
+            names = {p.name for p in (tmp / 'out2').iterdir()}
+            self.assertLessEqual(set(new), names); self.assertNotIn(old[0], names); self.assertNotIn(old[2], names)  # one generation only
+            # today's live page is the v2 one: its three window files are carried too
+            v2 = tmp / 'v2'; v2.mkdir(); app, css = 'app.e8403d73240a1990.js', 'style.82a1b69b09437942.css'
+            (v2 / 'index.html').write_text(f'<link rel="icon" href="data:,"><link href="{css}"><script src="{app}"></script><a href="api/v1/catalog.json"></a>')
+            windows = [f'data-{w}.{h}.json' for w, h in (('day', '18fd23d482942271'), ('week', 'b69ecdadbcb420d7'), ('month', '43d945287bfad983'))]
+            (v2 / app).write_text("const NOTE = 'it\\'s'; " + ' '.join(f"'{n}'" for n in windows)); (v2 / css).write_text('body{}')  # an escaped quote first
+            for name in windows:
+                (v2 / name).write_text('{}')
+            self.assertEqual(sorted(st.previous_generation(v2)), sorted([app, css, *windows]))
+            # an unreadable previous publication carries nothing, says why, and does not block the deploy
+            result = st.stage_site(site, data_dir(tmp, docs[0], name='d3'), tmp / 'out3', now=NOW, previous=tmp / 'missing')
+            self.assertEqual(result['previous_generation'], []); self.assertIn('previous generation unreadable', result['previous_generation_note'])
 
     def test_a_refused_gate_stages_nothing_and_says_why(self):
         with tempfile.TemporaryDirectory() as tmp:

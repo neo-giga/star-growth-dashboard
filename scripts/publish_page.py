@@ -16,11 +16,12 @@ def main(argv=None):
     p.add_argument('--output-dir', required=True, help='where the site is staged; must not exist')
     p.add_argument('--diagnostic', help='also write the diagnostic JSON here')
     p.add_argument('--now', help='ISO instant the file age is measured against (tests); default: now')
+    p.add_argument('--previous-site', help='the previous publication (an https URL or a staged site directory) whose hashed assets are carried for one deploy')
     p.add_argument('--ignore-gate', action='store_true', help='stage even when the gate refuses (local previews only; the workflow never passes it)')
     a = p.parse_args(argv)
     now = dt.datetime.fromisoformat(a.now.replace('Z', '+00:00')) if a.now else None
     try:
-        result = dict(stage_site(a.site_dir, a.data_dir, a.output_dir, now=now, ignore_gate=a.ignore_gate), status='ok', problems=[])
+        result = dict(stage_site(a.site_dir, a.data_dir, a.output_dir, now=now, ignore_gate=a.ignore_gate, previous=a.previous_site), status='ok', problems=[])
         code = 0
     except GateRefused as exc:
         result = {'status': 'refused', 'problems': exc.problems, 'measurements': exc.measurements, 'current_site_preserved': True}
