@@ -272,77 +272,23 @@ def build_agent_exports(dashboard_dict, output_path, base_url='https://neo-giga.
     return catalog
 
 
-def build_ui_index(dashboard_dict, catalog):
-    """Small metric index; fetch metadata_url and select metadata_record_id for details.
+UI_ROW_FIELDS = ('repo_id', 'full_name', 'stars', 'gain', 'language', 'created_at', 'created_at_github_repo_id')
 
-    Metadata and per-row observation remain authoritative in the agent page; this
-    avoids replicating rich provenance tens of thousands of times in initial UI.
+
+def build_ui_files(dashboard_dict, catalog):
+    """{period: payload} for the page: one file per window holding only the fields the page renders (plus the GitHub ID that
+    backs the creation date), rows in provider-gain order, and the agent catalog/snapshot the publication belongs to.
+
+    Per-row provenance and cached metadata stay in the agent snapshot; the page asks GitHub live for details.
     """
-    output = {k: v for k, v in dashboard_dict.items() if k != 'feeds'}
-    output['agent_catalog_url'] = catalog['manifest_url'].split('/snapshots/')[0] + '/catalog.json'
-    output['agent_snapshot_id'] = catalog['snapshot_id']
-    output['feeds'] = []
-    by_period = {f['period']: f for f in catalog['feeds']}
-    keep = ('repo_id', 'full_name', 'stars', 'gain', 'language', 'created_at', 'created_at_github_repo_id')
+    common = {k: v for k, v in dashboard_dict.items() if k != 'feeds'}
+    common['agent_catalog_url'] = catalog['manifest_url'].split('/snapshots/')[0] + '/catalog.json'
+    common['agent_snapshot_id'] = catalog['snapshot_id']
+    output = {}
     for feed in dashboard_dict.get('feeds', []):
         compact = {k: v for k, v in feed.items() if k != 'rows'}
         rows = list(feed.get('rows', []))
         rows.sort(key=lambda r: (r.get('gain') is None, -(r.get('gain') or 0), r['full_name'].casefold(), f"gittrend:{r['repo_id']}"))
-        first = by_period[feed['period']]['first_page_url']
-        prefix = first.rsplit('/', 1)[0] + '/'
-        compact['rows'] = [dict({k: r.get(k) for k in keep}, metadata_url=prefix+f'{i//PAGE_SIZE+1:06d}.json',
-                                metadata_record_id=f"gittrend:{r['repo_id']}") for i, r in enumerate(rows)]
-        output['feeds'].append(compact)
-    return output
-
-
-def hydrate_ui_index(dashboard_dict, site_root, base_url='https://neo-giga.github.io/star-growth-dashboard/'):
-    """Recover public cached enrichments locally. Never fetch URLs or follow symlinks out.
-
-    Missing/mismatched immutable page data raises; never silently forget enrichment.
-    """
-    from copy import deepcopy
-    from urllib.parse import urlsplit, unquote
-    output = deepcopy(dashboard_dict)
-    root = Path(site_root).resolve()
-    base = urlsplit(base_url.rstrip('/') + '/')
-    pages = {}
-    for feed in output.get('feeds', []):
-        for row in feed.get('rows', []):
-            if not row.get('metadata_url'):
-                continue
-            url = row['metadata_url']
-            parsed = urlsplit(url)
-            if (parsed.scheme, parsed.netloc) != (base.scheme, base.netloc) or parsed.query or parsed.fragment:
-                raise ValueError('metadata URL outside site origin')
-            if not parsed.path.startswith(base.path + 'api/v1/snapshots/'):
-                raise ValueError('metadata URL outside immutable snapshot path')
-            relative = unquote(parsed.path[len(base.path):])
-            path = (root / relative).resolve()
-            if root not in path.parents or '..' in Path(relative).parts:
-                raise ValueError('metadata path traversal')
-            if url not in pages:
-                page = json.loads(path.read_text())
-                if page.get('period') != feed['period']:
-                    raise ValueError('metadata page period mismatch')
-                expected_snapshot = output.get('agent_snapshot_id')
-                if expected_snapshot and page.get('snapshot_id') != expected_snapshot:
-                    raise ValueError('metadata page snapshot mismatch')
-                entries = page.get('rows', [])
-                if len({r['record_id'] for r in entries}) != len(entries):
-                    raise ValueError('duplicate metadata page ID')
-                pages[url] = {r['record_id']: r for r in entries}
-            wanted = f"gittrend:{row['repo_id']}"
-            if row.get('metadata_record_id') != wanted or wanted not in pages[url]:
-                raise ValueError('metadata record identity mismatch')
-            record = pages[url][wanted]
-            if record['identity']['full_name'] != row['full_name']:
-                raise ValueError('metadata record name mismatch')
-            p = record['provenance']
-            row['metadata'] = {k: record['metadata'].get(k) for k in METADATA_FIELDS}
-            row['metadata'].update(source=p.get('metadata_source'), observed_at=p.get('metadata_observed_at'),
-                                   contributor_measured_at=p.get('contributor_measured_at'),
-                                   unknown_flags=p.get('unknown_flags', []),
-                                   github_repo_id=record['identity'].get('github_metadata_repo_id'))
-            row['observation'] = {'page': p.get('provider_page'), 'source_url': p.get('source_url'), 'fetched_at': p.get('fetched_at')}
+        compact['rows'] = [{k: r.get(k) for k in UI_ROW_FIELDS} for r in rows]
+        output[feed['period']] = dict(common, feeds=[compact])
     return output

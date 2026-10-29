@@ -1,15 +1,29 @@
 # INSTALLED at .github/workflows/weekly-refresh.yml (keep this copy identical); Pages source: GitHub Actions.
 # Approved job-scoped permissions for the public dashboard repository only.
 # Install as .github/workflows/weekly-refresh.yml in the public dashboard repository.
-# Official artifact deployment is explicit; GITHUB_TOKEN pushes alone do not trigger Pages.
+# Official artifact deployment is explicit; nothing is committed to git: the site is rebuilt as the Pages artifact
+# from the repository's UI sources plus the run's staged data, and the previous state is read from the github-pages
+# artifact of this workflow's newest successful run (retained 30 days), never from the Pages CDN.
 name: Daily public feed refresh
 on:
   schedule:
     - cron: '23 7 * * *'
+  push:
+    branches: [main]
+    # A merged UI/source change re-publishes the last published data with the new UI (validate-current); no new data is read.
+    paths:
+      - index.html
+      - app.js
+      - style.css
+      - llms.txt
+      - docs/agent-feed.md
+      - scripts/**
+      - trending/**
+      - .github/workflows/weekly-refresh.yml
   workflow_dispatch:
     inputs:
       mode:
-        description: 'refresh retrieves new feeds; validate-current tests exports/deployment without new data'
+        description: 'refresh retrieves new feeds; validate-current re-publishes the last published data with the current UI'
         type: choice
         options: [refresh, validate-current]
         default: validate-current
@@ -17,10 +31,30 @@ on:
         description: 'Per-period safety bound; a reached bound never publishes partial data'
         type: string
         default: '1000'
-      top:
-        description: 'Rows per period (multiple of 100, 100..10000); 0 reads the whole feed under the strict rule'
+      day_depth:
+        description: 'Day rows: all (whole feed) or a multiple of 100'
+        type: string
+        default: 'all'
+      week_depth:
+        description: 'Week rows: all (whole feed) or a multiple of 100'
+        type: string
+        default: 'all'
+      month_depth:
+        description: 'Month rows: all (~676 pages; fits the 6 h job only on a fast provider day) or a multiple of 100'
+        type: string
+        default: '20000'
+      verify_top:
+        description: 'Rows per period read twice and published only when both reads agree (multiple of 100, 100..10000)'
         type: string
         default: '2000'
+      top:
+        description: 'Legacy alias for depth=N verify_top=N; 0 reads the whole feed under the strict rule; empty uses depth/verify_top'
+        type: string
+        default: ''
+      bootstrap_from_live:
+        description: 'One-time: when no successful run has a readable github-pages artifact, read the previous publication from the live site'
+        type: boolean
+        default: false
 permissions:
   contents: read
 concurrency:
@@ -30,16 +64,21 @@ jobs:
   refresh-and-publish:
     if: github.repository == 'neo-giga/star-growth-dashboard' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 330
-    # Neo approved this narrow publication bundle; no personal token is required.
+    timeout-minutes: 360
+    # Neo approved this narrow publication bundle; no personal token is required and nothing writes to the repository.
     permissions:
-      contents: write
+      contents: read
+      actions: write  # read: the previous publication's artifact; write: dispatch a replacement refresh when sources change
       pages: write
       id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - name: Refuse a re-run
+        run: |
+          # Every run owns at most one github-pages artifact: the next run reads the publication back from the run that deployed it.
+          if [ "$GITHUB_RUN_ATTEMPT" != 1 ]; then echo "re-runs are disabled; dispatch a new run" >&2; exit 1; fi
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -47,15 +86,25 @@ jobs:
       - name: Unit checks (no network fixtures)
         run: python3 -m unittest discover -s tests
       - name: Stage validated site without changing current files
+        id: stage
         env:
           GH_TOKEN: ${{ github.token }}
-          MODE: ${{ inputs.mode || 'refresh' }}
+          MODE: ${{ inputs.mode || (github.event_name == 'push' && 'validate-current') || 'refresh' }}
           MAX_PAGES: ${{ inputs.max_pages || '1000' }}
+          DEPTH: day=${{ inputs.day_depth || 'all' }},week=${{ inputs.week_depth || 'all' }},month=${{ inputs.month_depth || '20000' }}
+          VERIFY_TOP: ${{ inputs.verify_top || '2000' }}
           TOP: ${{ inputs.top }}
+          BOOTSTRAP: ${{ inputs.bootstrap_from_live && '--bootstrap-from-live' || '' }}
         run: |
+          set +e
           python3 scripts/weekly_refresh.py --site-dir . --output-dir "$RUNNER_TEMP/site" \
-            --mode "$MODE" --max-pages "$MAX_PAGES" --top "${TOP:-2000}" \
-            --checkpoint-dir "$RUNNER_TEMP/checkpoints" --diagnostic "$RUNNER_TEMP/refresh-diagnostic.json"
+            --mode "$MODE" --max-pages "$MAX_PAGES" --depth "$DEPTH" --verify-top "$VERIFY_TOP" ${TOP:+--top "$TOP"} $BOOTSTRAP \
+            --deadline-minutes 330 --checkpoint-dir "$RUNNER_TEMP/checkpoints" --diagnostic "$RUNNER_TEMP/refresh-diagnostic.json"
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          # 0: every window refreshed. 3: staged with a window carried from the previous publication: deploy it, then fail the run
+          # (the owner is emailed). Anything else: nothing staged, the current site stays.
+          [ "$code" = 0 ] || [ "$code" = 3 ]
       - name: Preserve diagnostic and public page checkpoints
         if: always()
         uses: actions/upload-artifact@v4
@@ -66,31 +115,34 @@ jobs:
             ${{ runner.temp }}/checkpoints
           retention-days: 7
           if-no-files-found: ignore
-      - name: Persist immutable snapshots and current pointer
+      - name: Refuse to deploy a stale run
         env:
           GH_TOKEN: ${{ github.token }}
+          MODE: ${{ inputs.mode || (github.event_name == 'push' && 'validate-current') || 'refresh' }}
         run: |
-          # Only validated allowlisted site output is copied. No deletions of old snapshots/assets.
-          cp -a "$RUNNER_TEMP/site/." .
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add index.html .nojekyll llms.txt api docs/agent-feed.md
-          git add -- 'app.*.js' 'style.*.css' 'data.*.json'
-          if ! git diff --cached --quiet; then
-            git commit -m 'Refresh validated public repository feed'
-            # No force push: a concurrent outside writer fails safely instead of overwriting.
-            git -c credential.helper='!gh auth git-credential' push origin HEAD:main
-          fi
-          # Deploy only what live main holds: a stale re-run must never roll Pages back.
-          live="$(git ls-remote origin refs/heads/main | cut -f1)"
-          if [ "$live" != "$(git rev-parse HEAD)" ]; then
-            echo "main is at $live, not this run's $(git rev-parse HEAD); dispatch a new run" >&2
+          # Deploy only when live main's UI/scripts/workflow (the push trigger's paths, scripts/deploy_paths.py) match this run's:
+          # a stale run must never roll Pages back to an older UI, and a newer tests/docs-only commit must not strand this one.
+          git fetch --no-tags --depth=1 origin refs/heads/main
+          if ! python3 scripts/deploy_paths.py HEAD FETCH_HEAD; then
+            if [ "$MODE" = refresh ]; then
+              # The queued push run only re-releases yesterday's data: queue a refresh on the new sources instead. It takes the
+              # concurrency group's single pending slot, superseding that push run (a refresh ships the new UI too).
+              gh workflow run weekly-refresh.yml --ref main -f mode=refresh
+              echo "sources changed on main; replacement refresh $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/workflows/weekly-refresh.yml dispatched" >&2
+            fi
             exit 1
           fi
       - name: Upload exact staged Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: ${{ runner.temp }}/site
+          # The durable record of what is published: the next run reads it back for carry-over and re-release.
+          retention-days: 30
       - name: Deploy exact artifact
         id: deployment
         uses: actions/deploy-pages@v4
+      - name: Fail the run when a window kept its previous rows
+        if: steps.stage.outputs.code == '3'
+        run: |
+          echo "deployed, but a window kept its previous rows: see carried_windows in refresh-diagnostic-${{ github.run_id }}" >&2
+          exit 1

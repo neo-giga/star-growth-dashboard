@@ -48,7 +48,12 @@ def number(value, *, nullable=False, nonnegative=False):
 
 
 class FeedClient:
-    def __init__(self, fetch=None, sleeper=time.sleep, max_attempts=3, cache_dir=None, resume=False):
+    # Waits before attempts 2..6 on 429/5xx/timeouts. On 2026-10-28 GitTrend answered month page 176 with 503 three times within
+    # ~3 s (old 1 s / 2 s backoff) to two separate runs in the same second; the page read fine 45 minutes later.
+    BACKOFF = (5, 15, 30, 60, 120)
+    MAX_RETRY_AFTER = 300
+
+    def __init__(self, fetch=None, sleeper=time.sleep, max_attempts=6, cache_dir=None, resume=False):
         if max_attempts < 1 or max_attempts > 8:
             raise ValueError('max_attempts must be 1..8')
         self.fetch = fetch or self._fetch
@@ -109,22 +114,22 @@ class FeedClient:
             except urllib.error.HTTPError as exc:
                 if exc.code not in (429, 500, 502, 503, 504) or attempt + 1 == self.max_attempts:
                     raise
-                delay = 2 ** attempt
+                delay = self.BACKOFF[min(attempt, len(self.BACKOFF) - 1)]
                 retry_after = exc.headers.get('Retry-After') if exc.headers else None
                 if retry_after:
                     try:
                         delay = max(delay, float(retry_after))
                     except ValueError:
                         raise ValueError('non-numeric Retry-After; retry later') from exc
-                    if delay > 60:
-                        raise ValueError('provider requests a delay above 60 seconds; retry later') from exc
+                    if delay > self.MAX_RETRY_AFTER:
+                        raise ValueError(f'provider requests a delay above {self.MAX_RETRY_AFTER} seconds; retry later') from exc
                 self.retries += 1
                 self.sleeper(delay)
             except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException):
                 if attempt + 1 == self.max_attempts:
                     raise
                 self.retries += 1
-                self.sleeper(2 ** attempt)
+                self.sleeper(self.BACKOFF[min(attempt, len(self.BACKOFF) - 1)])
 
 
 def normalize(row):
@@ -140,57 +145,117 @@ def normalize(row):
             'url': 'https://github.com/' + name}
 
 
-def collect_feed(client, period, limit=100, max_pages=1000):
-    if period not in PERIODS.values() or not 1 <= limit <= 100 or max_pages < 1:
+TRANSIENT = (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException)
+
+
+CONSECUTIVE_FAILURES = 3
+
+
+def collect_feed(client, period, limit=100, max_pages=1000, first_page=1, keep_first=False, requeue=False, before_page=None,
+                 on_failed_page=None, clock=time.monotonic):
+    """first_page > 1 reads a tail continuing an earlier read; keep_first keeps a duplicate ID's best-ranked row. requeue: a page
+    whose fetch still fails after the client's retries is read once more after the last page; a second failure is the failure, and
+    CONSECUTIVE_FAILURES failed pages in a row end the read at once (a dead endpoint, not an isolated failure).
+    before_page(period, page) runs before every page read and may raise to stop the read (a time budget).
+    on_failed_page(seconds) is told how long each failed page read took (retries included) and returns a reason to stop, or None."""
+    if period not in PERIODS.values() or not 1 <= limit <= 100 or max_pages < 1 or first_page < 1:
         raise ValueError('invalid period/limit/max_pages')
     started = utcnow()
-    rows, pages, warnings = {}, [], []
-    duplicates = 0
+    page_rows, read_pages, warnings = {}, {}, []
     first_total = None
     reached_end = False
     failure = None
-    for page in range(1, max_pages + 1):
+    requeued = []
+
+    def read(page):
+        """One page into page_rows/read_pages; True when the provider says more pages follow."""
+        nonlocal first_total
+        if before_page:
+            before_page(period, page)
         requested_at = utcnow()
+        payload = client.page(period, page, limit)
+        requested_at = getattr(client, 'last_fetched_at', None) or requested_at
+        items, pg = payload.get('data'), payload.get('pagination')
+        if not isinstance(items, list) or not isinstance(pg, dict):
+            raise ValueError('missing data or pagination')
+        total = number(pg.get('total'), nonnegative=True)
+        actual_page = number(pg.get('page'), nonnegative=True)
+        actual_limit = number(pg.get('limit'), nonnegative=True)
+        total_pages = number(pg.get('totalPages'), nonnegative=True)
+        has_more = pg.get('hasMore')
+        if actual_page != page or actual_limit != limit or type(has_more) is not bool:
+            raise ValueError('provider returned unexpected page/limit/hasMore')
+        if total_pages != math.ceil(total / limit) or has_more != (page < total_pages):
+            raise ValueError('inconsistent pagination metadata')
+        expected = min(limit, max(0, total - (page - 1) * limit))
+        normalized = [normalize(item) for item in items]
+        if len(items) != expected:
+            warnings.append(f'page {page} returned {len(items)}, expected {expected}')
+        if first_total is None:
+            first_total = total
+        elif total != first_total:
+            warnings.append(f'provider total changed from {first_total} to {total} at page {page}')
+        for row in normalized:
+            row['observation'] = {'provider': 'gittrend', 'period': period, 'page': page, 'fetched_at': requested_at,
+                                  'source_url': BASE_URL + '?' + urllib.parse.urlencode({'time': period, 'page': page, 'limit': limit}),
+                                  'source_as_of': None}
+        page_rows[page] = normalized
+        read_pages[page] = {'page': page, 'total': total, 'returned': len(items), 'requested_at': requested_at}
+        if has_more and not items:
+            raise ValueError('empty page claims more data')
+        return has_more
+
+    def failed(started):
+        """A reason to stop after a failed page read (the window's failed-page time cap), or None."""
+        return on_failed_page(clock() - started) if on_failed_page else None
+
+    consecutive = 0
+    for page in range(first_page, first_page + max_pages):
+        started_page = clock()
         try:
-            payload = client.page(period, page, limit)
-            requested_at = getattr(client, 'last_fetched_at', None) or requested_at
-            items, pg = payload.get('data'), payload.get('pagination')
-            if not isinstance(items, list) or not isinstance(pg, dict):
-                raise ValueError('missing data or pagination')
-            total = number(pg.get('total'), nonnegative=True)
-            actual_page = number(pg.get('page'), nonnegative=True)
-            actual_limit = number(pg.get('limit'), nonnegative=True)
-            total_pages = number(pg.get('totalPages'), nonnegative=True)
-            has_more = pg.get('hasMore')
-            if actual_page != page or actual_limit != limit or type(has_more) is not bool:
-                raise ValueError('provider returned unexpected page/limit/hasMore')
-            if total_pages != math.ceil(total / limit) or has_more != (page < total_pages):
-                raise ValueError('inconsistent pagination metadata')
-            expected = min(limit, max(0, total - (page - 1) * limit))
-            normalized = [normalize(item) for item in items]
-            if len(items) != expected:
-                warnings.append(f'page {page} returned {len(items)}, expected {expected}')
-            if first_total is None:
-                first_total = total
-            elif total != first_total:
-                warnings.append(f'provider total changed from {first_total} to {total} at page {page}')
-            for row in normalized:
-                row['observation'] = {'provider': 'gittrend', 'period': period, 'page': page, 'fetched_at': requested_at,
-                                      'source_url': BASE_URL + '?' + urllib.parse.urlencode({'time': period, 'page': page, 'limit': limit}),
-                                      'source_as_of': None}
-                if row['repo_id'] in rows:
-                    duplicates += 1
-                rows[row['repo_id']] = row
-            pages.append({'page': page, 'total': total, 'returned': len(items), 'requested_at': requested_at})
-            if not has_more:
+            if not read(page):
                 reached_end = True
                 break
-            if not items:
-                raise ValueError('empty page claims more data')
-        except (ValueError, urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
-            # Preserve a clearly partial diagnostic result; never publish a complete cache on failure.
+            consecutive = 0
+        except TRANSIENT as exc:
+            if not requeue:
+                # Preserve a clearly partial diagnostic result; never publish a complete cache on failure.
+                failure = f'{type(exc).__name__}: {str(exc)[:200]}'
+                failed(started_page)
+                break
+            requeued.append(page)
+            consecutive += 1
+            stop = failed(started_page)
+            if consecutive >= CONSECUTIVE_FAILURES:
+                failure = f'{consecutive} consecutive pages failed (pages {page - consecutive + 1}-{page}): {type(exc).__name__}: {str(exc)[:200]}'
+            elif stop:
+                failure = f'{stop}: {type(exc).__name__}: {str(exc)[:200]}'
+            if failure:
+                break
+            if read_pages and page >= math.ceil(read_pages[max(read_pages)]['total'] / limit):
+                break  # the provider's last page by its latest total: nothing follows it; its re-queued read decides whether the end was reached
+        except ValueError as exc:
             failure = f'{type(exc).__name__}: {str(exc)[:200]}'
             break
+    for page in requeued:
+        if failure or (reached_end and page > max(read_pages)):
+            break
+        started_page = clock()
+        try:
+            if not read(page):
+                reached_end = True
+        except (ValueError, *TRANSIENT) as exc:
+            failure = f'page {page} failed again after re-queue: {type(exc).__name__}: {str(exc)[:200]}'
+            failed(started_page)
+    rows, duplicates = {}, 0
+    for page in sorted(page_rows):
+        for row in page_rows[page]:
+            if row['repo_id'] in rows:
+                duplicates += 1
+                if keep_first:
+                    continue
+            rows[row['repo_id']] = row
+    pages = [read_pages[page] for page in sorted(read_pages)]
     slug_ids = {}
     for row in rows.values():
         slug_ids.setdefault(row['full_name'].lower(), set()).add(row['repo_id'])
@@ -198,8 +263,8 @@ def collect_feed(client, period, limit=100, max_pages=1000):
     if ambiguous_slugs:
         warnings.append(f'{ambiguous_slugs} repository slugs have conflicting provider IDs; identities not merged')
     if duplicates:
-        warnings.append(f'{duplicates} duplicate provider IDs across pages; latest observed row retained')
-    if reached_end and (len(rows) != first_total):
+        warnings.append(f'{duplicates} duplicate provider IDs across pages; {"best-ranked" if keep_first else "latest"} observed row retained')
+    if reached_end and first_page == 1 and (len(rows) != first_total):
         warnings.append(f'unique rows {len(rows)} do not match initial provider total {first_total}')
     status = 'inconsistent' if warnings else ('complete' if reached_end and failure is None else 'partial')
     if failure:
@@ -215,6 +280,7 @@ def collect_feed(client, period, limit=100, max_pages=1000):
                          'unique_repos': len(rows), 'duplicates': duplicates, 'reached_end': reached_end,
                          'limit': limit, 'max_pages': max_pages, 'warnings': warnings,
                          'failure': failure, 'exhaustive_github': False,
+                         'retries': getattr(client, 'retries', 0), 'requeued_pages': requeued,
                          'scope': 'This provider period feed only; period universes differ; not all GitHub repositories',
                          'snapshot_consistency': 'Not established: provider supplies no dated revision token for paginated requests'},
             'pages': pages, 'rows': list(rows.values())}

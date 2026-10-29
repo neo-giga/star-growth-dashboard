@@ -34,7 +34,7 @@ class FillTests(unittest.TestCase):
   data={'feeds':[feed('day',[row(f'o/r{i}',i+1) for i in range(3)]),feed('week',rows+[row('o/dated',999,created='2020-01-01T00:00:00+00:00',created_id=1)])]}
   summary=m.fill_created_dates(data,query=query,batch_size=100)
   self.assertEqual([len(c) for c in calls],[100,50]);self.assertEqual(len(set(sum(calls,[]))),150)
-  self.assertEqual(summary['requested'],150);self.assertEqual(summary['filled'],153);self.assertEqual(summary['failed_batches'],0)
+  self.assertEqual(summary['requested'],150);self.assertEqual(summary['filled'],153);self.assertEqual(summary['failed_batches'],0);self.assertEqual(summary['deferred'],0);self.assertIsNone(summary['stopped'])
   self.assertTrue(all(r['created_at'] for r in rows));self.assertEqual(data['feeds'][1]['creation_dates'],{'known':151,'unknown':0});self.assertEqual(data['feeds'][0]['creation_dates'],{'known':3,'unknown':0})
  def test_failed_batch_is_skipped_not_fatal(self):
   def query(names):
@@ -45,7 +45,24 @@ class FillTests(unittest.TestCase):
   self.assertEqual(summary['failed_batches'],1);self.assertEqual(summary['filled'],1);self.assertEqual(summary['errors'],['gh: boom']);self.assertIsNone(rows[0]['created_at']);self.assertEqual(rows[2]['created_at'],'2024-01-02T03:04:05+00:00')
  def test_nothing_missing_makes_no_query(self):
   summary=m.fill_created_dates({'feeds':[feed('week',[row('o/a',1,created='2020-01-01T00:00:00+00:00')])]},query=lambda names:self.fail('queried'))
-  self.assertEqual(summary,{'requested':0,'filled':0,'batches':0,'failed_batches':0,'errors':[]})
+  self.assertEqual(summary,{'requested':0,'deferred':0,'filled':0,'batches':0,'failed_batches':0,'errors':[],'stopped':None})
+ def test_budget_caps_queries_in_rank_order_and_defers_the_rest(self):
+  calls=[]
+  def query(names):
+   calls.append(list(names));return {n.casefold():(1,'2024-01-02T03:04:05Z') for n in names}
+  rows=[row(f'o/r{i}',i+1) for i in range(1000)]
+  summary=m.fill_created_dates({'feeds':[feed('day',[row(f'o/r{i}',i+1) for i in range(5)]),feed('week',rows)]},query=query,batch_size=100,max_queries=3)
+  self.assertEqual([len(c) for c in calls],[100,100,100]);self.assertEqual(calls[0][:5],['o/r0','o/r1','o/r2','o/r3','o/r4'])
+  self.assertEqual((summary['requested'],summary['deferred'],summary['filled'],summary['batches']),(300,700,305,3));self.assertIsNone(rows[300]['created_at']);self.assertEqual(m.MAX_QUERIES,900)
+ def test_rate_limit_stops_the_run_without_failing_it(self):
+  calls=[]
+  def query(names):
+   calls.append(len(names))
+   if len(calls)==2:raise m.RateLimited('API rate limit exceeded')
+   return {n.casefold():(1,'2024-01-02T03:04:05Z') for n in names}
+  rows=[row(f'o/r{i}',i+1) for i in range(450)]
+  summary=m.fill_created_dates({'feeds':[feed('week',rows)]},query=query,batch_size=100)
+  self.assertEqual(calls,[100,100]);self.assertEqual(summary['stopped'],'rate limited after 2 queries: API rate limit exceeded');self.assertEqual((summary['filled'],summary['failed_batches'],summary['deferred']),(100,1,250))
 class GraphQLTests(unittest.TestCase):
  def test_query_uses_gh_and_tolerates_partial_errors(self):
   out={'data':{'r0':{'databaseId':12,'createdAt':'2024-01-02T03:04:05Z'},'r1':None,'r2':{'databaseId':None,'createdAt':'2024-01-02T03:04:05Z'}},'errors':[{'type':'NOT_FOUND','path':['r1']}]}
@@ -54,6 +71,10 @@ class GraphQLTests(unittest.TestCase):
   self.assertEqual(found,{'o/a':(12,'2024-01-02T03:04:05Z')})
   args,kwargs=run.call_args;self.assertEqual(args[0],['gh','api','graphql','--input','-']);body=json.loads(kwargs['input'])
   self.assertIn('r0: repository(owner:"o", name:"a") { databaseId createdAt }',body['query']);self.assertIn('r2: repository(owner:"o", name:"c")',body['query'])
+ def test_rate_limited_answer_is_its_own_error(self):
+  out={'data':None,'errors':[{'type':'RATE_LIMITED','message':'API rate limit already exceeded for this token'}]}
+  with patch.object(m.subprocess,'run',return_value=subprocess.CompletedProcess(['gh'],0,json.dumps(out),'')):
+   with self.assertRaisesRegex(m.RateLimited,'already exceeded'): m.query_created_dates(['o/a'])
  def test_non_json_output_raises(self):
   with patch.object(m.subprocess,'run',return_value=subprocess.CompletedProcess(['gh'],4,'','gh: not logged in')):
    with self.assertRaises(RuntimeError): m.query_created_dates(['o/a'])
