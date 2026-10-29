@@ -219,9 +219,9 @@ if (typeof document !== 'undefined') {
     el('page-label').textContent = `Page ${page} of ${pages}`;
   }
   function changePeriod() {
-    page = 1; const period = el('period').value, feed = currentFeed();
+    page = 1; el('error').hidden = true; const period = el('period').value, feed = currentFeed();  // a banner belongs to the window whose load raised it
     if (!feed) {
-      el('error').hidden = true; el('rows').replaceChildren(); el('result-count').textContent = 'Loading…'; el('page-label').textContent = '';
+      el('rows').replaceChildren(); el('result-count').textContent = 'Loading…'; el('page-label').textContent = '';
       loadPeriod(period).then(() => { if (el('period').value === period) changePeriod(); }, error => {
         if (el('period').value !== period) return;
         el('error').hidden = false; el('error').textContent = `${error.message} This page must be served over HTTP(S), not opened as a local file.`; render();
