@@ -190,6 +190,7 @@ if (typeof document !== 'undefined') {
   }
   function render() {
     const feed = currentFeed(), rows = feed ? feed.rows : [];
+    if (!feed && pending[el('period').value]) return;  // the window is still loading: changePeriod shows Loading and renders when its fetch resolves
     const sorted = selectRows(rows, {sort:el('sort').value, search:el('search').value, language:el('language').value});
     const pages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE)); page = Math.min(page, pages);
     const offset = (page - 1) * PAGE_SIZE, body = el('rows'); body.replaceChildren();
