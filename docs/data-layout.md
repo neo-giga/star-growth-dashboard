@@ -11,16 +11,26 @@ daily capture runs at 05:30 UTC, i.e. 22:30 PDT / 21:30 PST, so a snapshot is da
 
 | path | written by | content |
 |---|---|---|
-| `repos.json` | daily | the known set: `{threshold, updated_at, repos: {node_id: {full_name, language, created_at, stars, first_seen, last_seen}}}`. A repo stays known after it drops below the threshold or is deleted; the page filters by today's count. |
+| `repos.json` | daily | the known set: `{threshold, updated_at, repos: {node_id: {full_name, language, created_at, first_seen}}}`. No per-day field: today's count is the snapshot's, and a repo was last seen on the newest snapshot that lists it. A repo stays known after it drops below the threshold or is deleted; the page filters by today's count. |
 | `slices.json` | daily | the star-range plan for the next discovery: `[{lo, hi}]`, the last `hi` null (open-ended). Each slice held at most 800 results the day before, so a healthy run lists without probing. |
 | `meta.json` | daily | `first_snapshot_date` (the ring's start), `last_total_count` (+ `_at`, `_source`: `search` or `previous`), `last_capture_date`. |
-| `snapshots/YYYY/YYYY-MM-DD.json.gz` | daily, forever | `{schema, date, captured_at, threshold, rows, node_id: [...], stars: [...]}`, sorted by node ID. One count per known repo that answered that day. |
+| `snapshots/YYYY/YYYY-MM-DD.json` | daily, forever | `{schema, date, captured_at, threshold, rows, node_id: [...], stars: [...]}`, sorted by node ID, plain compact JSON (not gzipped: git delta-compresses consecutive days). One count per known repo that answered that day. |
 | `history/XX.json` | backfill, daily | per-day star history by node ID, 256 shards by the first two hex digits of SHA-1(node ID): `{node_id: {start, days, through, anchor_at, anchor_stars, pages, has_more}}` (below). |
-| `windows/latest.json` | daily | the page-ready file (below). |
-| `windows/YYYY/YYYY-MM-DD.json.gz` | daily, forever | that day's copy of `latest.json`. |
+| `windows/latest.json` | daily, **not committed** | the page-ready file (below). Written by the capture into its working copy and listed in the branch's `.gitignore` (`/windows/`); the publisher rebuilds it from a checkout of the branch with `python3 scripts/build_windows.py --data-dir <checkout>` (same bytes as the capture's). There is no daily copy: a past day's page is that day's snapshot plus the history shards. |
 | `diagnostics/YYYY/YYYY-MM-DD.json` | daily | the run's diagnostic: snapshot read/missing/points, discovery status and slices, entrants, coverage, the per-window sources, exit code. |
 
 Every write is atomic (temporary file + rename), so a killed run leaves whole files only.
+
+### Growth of the branch (measured 2026-10-29)
+
+Simulated on the real set (the 33,890 repos of 2026-10-29 with their names, languages, creation dates and counts, plus 600
+just under the threshold; ~28,900 counts change a day, median 1.7 stars a day): the backfill, then 14 days of the capture
+code, each day committed and `git gc --aggressive`. **+84 KiB of pack a day (82–85 on every day but one `gc` swing that
+reversed the next day), ~30 MiB a year**, plus 9.4 MiB once for the backfilled history. Pack per path after the 14 days:
+`history/` 8.6 MiB (the backfill), `snapshots/` 1.3 MiB, `repos.json` 1.1 MiB, `diagnostics/` 11 KiB. Two choices keep it
+there: `repos.json` carries no per-day field (a daily `stars` + `last_seen` cost 4.6 MiB of pack in 14 days), and
+`windows/latest.json` is not committed (its gains change every day in every row: ~395 KiB of pack a day in any layout tried,
+columnar or one row per line, ~141 MiB a year).
 
 ## History records
 

@@ -2,7 +2,9 @@
 
 Order matters: the snapshot of the known set is written first, discovery (search, best effort, deadline) comes second and never
 blocks it, repos without history (today's entrants first, at most MAX_HISTORY_PER_DAY) get their two history pages, then
-repos.json, the windows file and the diagnostic. Exit codes:
+repos.json, the windows file and the diagnostic. The day's counts live in the snapshot only: repos.json carries no per-day field,
+so it only changes when a repo enters, is renamed or changes language (measured 2026-10-29: a daily `stars` + `last_seen` cost
+4.6 MiB of pack in 14 days, ~120 MiB a year, for data the snapshot already holds). Exit codes:
 0 fine; 3 the files are written but coverage (repos read with stars above the threshold / search total_count) is under
 COVERAGE_FLOOR, so the run should go red after committing; 2 nothing usable was written.
 """
@@ -46,8 +48,7 @@ def run(gh, data, threshold, now=None, workers=4, deadline_minutes=60, skip_disc
     counts = {}
     for node_id, row in rows.items():
         counts[node_id] = row['stars']
-        known[node_id].update({'full_name': row['full_name'], 'language': row['language'], 'created_at': row['created_at'], 'stars': row['stars'],
-                               'last_seen': date.isoformat()})
+        known[node_id].update({'full_name': row['full_name'], 'language': row['language'], 'created_at': row['created_at']})
     if counts:
         data.write_snapshot(date, now.isoformat(), counts, threshold)
     log(f'snapshot: {stats["read"]}/{stats["asked"]} known repos read, {stats["points"]} points, {stats["failed_queries"]} failed queries, {stats["seconds"]} s')
@@ -78,12 +79,10 @@ def run(gh, data, threshold, now=None, workers=4, deadline_minutes=60, skip_disc
         diagnostic['snapshot']['points'] += fresh_stats['points']
         diagnostic['new_entrants']['snapshot'] = fresh_stats
         for node_id, item in entrants.items():
-            known[node_id] = {'full_name': item['full_name'], 'language': item.get('language'), 'created_at': item.get('created_at'), 'stars': item['stars'],
-                              'first_seen': date.isoformat(), 'last_seen': date.isoformat()}
+            known[node_id] = {'full_name': item['full_name'], 'language': item.get('language'), 'created_at': item.get('created_at'), 'first_seen': date.isoformat()}
             if node_id in fresh:
                 counts[node_id] = fresh[node_id]['stars']
-                known[node_id].update({'full_name': fresh[node_id]['full_name'], 'language': fresh[node_id]['language'], 'created_at': fresh[node_id]['created_at'],
-                                       'stars': fresh[node_id]['stars']})
+                known[node_id].update({'full_name': fresh[node_id]['full_name'], 'language': fresh[node_id]['language'], 'created_at': fresh[node_id]['created_at']})
         diagnostic['new_entrants']['count'] = len(entrants)
         if counts:
             data.write_snapshot(date, now.isoformat(), counts, threshold)
@@ -121,7 +120,7 @@ def run(gh, data, threshold, now=None, workers=4, deadline_minutes=60, skip_disc
     page = None
     if counts:
         page = build_page(date, now.isoformat(), threshold, known, counts, data.snapshot_dates(), data.read_snapshot, history, first_snapshot)
-        data.write_windows(date, page)
+        data.write_windows(page)
         diagnostic['windows'] = {'rows': page['row_count'], 'history_records': len(history), 'per_window': page['windows']}
     above = sum(1 for stars in counts.values() if stars > threshold)
     ratio = (above / total) if total else None

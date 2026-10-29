@@ -1,16 +1,16 @@
 """The data branch's files (docs/data-layout.md is the reference):
 
-repos.json                      the known set: {threshold, updated_at, repos: {node_id: {full_name, language, created_at, stars, first_seen, last_seen}}}
+repos.json                      the known set: {threshold, updated_at, repos: {node_id: {full_name, language, created_at, first_seen}}} (no per-day field)
 slices.json                     the next discovery's star-range plan
 meta.json                       first_snapshot_date, last_total_count, last_capture_date
-snapshots/YYYY/YYYY-MM-DD.json.gz   one star count per known repo per Pacific day, kept forever
+snapshots/YYYY/YYYY-MM-DD.json  one star count per known repo per Pacific day, kept forever (plain JSON: git delta-compresses it between days)
 history/XX.json                 per-day star history by node ID, 256 shards by the SHA-1 of the ID
-windows/latest.json             the page-ready file (the interface the page builds on); windows/YYYY/YYYY-MM-DD.json.gz its daily copies
+windows/latest.json             the page-ready file (the interface the page builds on), not committed (.gitignore): scripts/build_windows.py derives it
 diagnostics/YYYY/YYYY-MM-DD.json    the day's run diagnostic
 Every write is atomic (temporary file + rename), so a killed run leaves whole files only.
 """
 from __future__ import annotations
-import datetime as dt, gzip, hashlib, json, os, pathlib, tempfile
+import datetime as dt, hashlib, json, os, pathlib, tempfile
 
 SNAPSHOT_SCHEMA = 'star-growth-dashboard/snapshot/1'
 HISTORY_SHARDS = 256
@@ -71,13 +71,13 @@ class DataDir:
 
     # -- snapshots ---------------------------------------------------------------------------------------------------
     def snapshot_path(self, date):
-        return self.root / 'snapshots' / date.isoformat()[:4] / f'{date.isoformat()}.json.gz'
+        return self.root / 'snapshots' / date.isoformat()[:4] / f'{date.isoformat()}.json'
 
     def snapshot_dates(self):
         root = self.root / 'snapshots'
         if not root.exists():
             return []
-        return sorted(dt.date.fromisoformat(p.name[:10]) for p in root.glob('*/*.json.gz'))
+        return sorted(dt.date.fromisoformat(p.name[:10]) for p in root.glob('*/*.json'))
 
     def read_snapshot(self, date):
         """{node_id: stars} of one day (cached), or None when that day has no snapshot."""
@@ -85,7 +85,7 @@ class DataDir:
             path = self.snapshot_path(date)
             if not path.exists():
                 return None
-            with gzip.open(path, 'rb') as handle:
+            with open(path, 'rb') as handle:
                 doc = json.load(handle)
             self._snapshots[date] = dict(zip(doc['node_id'], doc['stars']))
         return self._snapshots[date]
@@ -94,7 +94,7 @@ class DataDir:
         ids = sorted(counts)
         doc = {'schema': SNAPSHOT_SCHEMA, 'date': date.isoformat(), 'captured_at': captured_at, 'threshold': threshold, 'rows': len(ids),
                'node_id': ids, 'stars': [counts[i] for i in ids]}
-        write_atomic(self.snapshot_path(date), gzip.compress(dumps(doc), mtime=0))
+        write_atomic(self.snapshot_path(date), dumps(doc))
         self._snapshots[date] = dict(counts)
 
     # -- history -----------------------------------------------------------------------------------------------------
@@ -125,10 +125,11 @@ class DataDir:
             write_atomic(path, dumps(dict(sorted(current.items()))))
 
     # -- windows and diagnostics -------------------------------------------------------------------------------------
-    def write_windows(self, date, page):
-        data = dumps(page)
-        write_atomic(self.root / 'windows' / 'latest.json', data)
-        write_atomic(self.root / 'windows' / date.isoformat()[:4] / f'{date.isoformat()}.json.gz', gzip.compress(data, mtime=0))
+    def write_windows(self, page):
+        write_atomic(self.root / 'windows' / 'latest.json', dumps(page))
+        # Derived from the snapshots and history, and its gains change every day: committed daily it cost ~395 KiB of pack a day
+        # (~141 MiB a year, measured 2026-10-29), so the branch ignores it and the publisher rebuilds it (scripts/build_windows.py).
+        write_atomic(self.root / '.gitignore', b'/windows/\n')
 
     def write_diagnostic(self, date, doc):
         write_atomic(self.root / 'diagnostics' / date.isoformat()[:4] / f'{date.isoformat()}.json', dumps(doc, compact=False))

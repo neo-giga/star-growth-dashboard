@@ -1,6 +1,6 @@
 """The daily run end to end on a synthetic set: discovery, snapshot, entrants' history, windows that flip from history to
 snapshot as the ring deepens, every gain checked against a plain recomputation from the truth, search outages, coverage."""
-import contextlib, datetime as dt, importlib.util, io, json, pathlib, shutil, sys, tempfile, unittest
+import contextlib, datetime as dt, importlib.util, io, json, pathlib, shutil, subprocess, sys, tempfile, unittest
 from unittest import mock
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from capture.github import GitHub
@@ -11,6 +11,8 @@ from fake_github import FakeClock, make_world
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location('daily_capture', ROOT / 'scripts/daily_capture.py')
 daily_capture = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(daily_capture)
+_spec = importlib.util.spec_from_file_location('build_windows', ROOT / 'scripts/build_windows.py')
+build_windows = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(build_windows)
 START = dt.datetime(2026, 3, 10, 5, 30, tzinfo=dt.timezone.utc)  # 21:30 PST on 2026-03-09, like the workflow's 05:30 UTC cron
 THRESHOLD = 2000
 
@@ -83,13 +85,33 @@ class DailyCaptureTests(unittest.TestCase):
                 self.assertEqual(page['columns']['stars'][row], self.world.stars(node_id, self.world.now))
                 self.assertEqual(page['columns']['full_name'][row], self.world.repos[node_id]['full_name'])
         repos = self.data.read_repos()['repos']
-        self.assertEqual(set(repos), set(entered)); self.assertEqual(repos[next(iter(entered))]['last_seen'], pacific_date(self.world.now).isoformat())
+        self.assertEqual(set(repos), set(entered))
+        for node_id, k in entered.items():  # the known set carries no per-day field (the snapshot does): it only changes when a repo enters
+            self.assertEqual(repos[node_id], {'full_name': self.world.repos[node_id]['full_name'], 'language': self.world.repos[node_id]['language'],
+                                              'created_at': self.world.repos[node_id]['created_at'], 'first_seen': pacific_date(self.instants[k]).isoformat()})
         self.assertEqual(sorted(self.data.snapshot_dates()), [pacific_date(self.instants[k]) for k in range(10)])
         self.assertEqual(len(self.data.read_history_all()), len(entered))
-        self.assertTrue((self.data.root / 'diagnostics/2026/2026-03-18.json').exists()); self.assertTrue((self.data.root / 'windows/2026/2026-03-18.json.gz').exists())
+        self.assertTrue((self.data.root / 'diagnostics/2026/2026-03-18.json').exists()); self.assertFalse((self.data.root / 'windows/2026').exists())
         meta = self.data.read_meta()
         self.assertEqual(meta['first_snapshot_date'], '2026-03-09'); self.assertEqual(meta['last_capture_date'], '2026-03-18')
         self.assertTrue(all(window['source'] == 'snapshot' for window in page['windows'][:2]))
+
+    def test_the_branch_ignores_windows_and_build_windows_rebuilds_the_same_bytes(self):
+        for k in range(3):
+            self.run_day(k)
+        latest = self.data.root / 'windows/latest.json'
+        captured = latest.read_bytes()
+        shutil.rmtree(self.data.root / 'windows')
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(build_windows.main(['--data-dir', str(self.data.root)]), 0)
+        self.assertEqual(latest.read_bytes(), captured)  # the publisher's rebuild is the capture's file, byte for byte
+        git = lambda *a: subprocess.run(['git', '-C', str(self.data.root), *a], check=True, capture_output=True, text=True).stdout
+        git('init', '-q'); git('add', '-A')
+        staged = git('diff', '--cached', '--name-only').split()
+        self.assertIn('.gitignore', staged); self.assertIn('snapshots/2026/2026-03-11.json', staged)
+        self.assertFalse([name for name in staged if name.startswith('windows/')])  # committed daily it would cost ~141 MiB a year
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(build_windows.main(['--data-dir', str(self.tmp / 'empty')]), 2)
 
     def test_a_search_outage_keeps_the_snapshot_and_reports_a_partial_discovery(self):
         self.run_day(0)
@@ -180,7 +202,7 @@ class DailyCaptureTests(unittest.TestCase):
         self.assertTrue(diag['dry_run']); self.assertEqual(diag['snapshot']['asked'], 50); self.assertIn(diag['discovery']['status'], ('complete', 'partial'))
         root = pathlib.Path(diag['data_dir']); self.addCleanup(shutil.rmtree, root, ignore_errors=True)
         self.assertNotEqual(root, self.data.root)
-        self.assertTrue((root / 'snapshots/2026/2026-03-10.json.gz').exists()); self.assertTrue((root / 'windows/latest.json').exists())
+        self.assertTrue((root / 'snapshots/2026/2026-03-10.json').exists()); self.assertTrue((root / 'windows/latest.json').exists())
         self.assertTrue((root / 'diagnostics/2026/2026-03-10.json').exists()); self.assertIn(f'dry run wrote {root}', out.getvalue())
         self.assertEqual((diag['new_entrants']['history_pending'], diag['new_entrants']['history_read']), (50, 50))  # the copy has no history shards
         self.assertGreaterEqual(diag['requests']['requests'], 1 + 1 + sum(s['pages'] for s in diag['discovery']['slices']) + 1 + 50)
