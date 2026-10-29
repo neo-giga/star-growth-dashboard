@@ -4,26 +4,39 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <title>Star Growth · Repository explorer</title>
+  <title>Star Growth · Repositories above 2,000 stars</title>
   <link rel="icon" href="data:,">
   <link rel="stylesheet" href="style.css">
   <script src="app.js" defer></script>
 </head>
 <body>
 <main>
-  <header class="page-head"><h1>Star growth</h1><p class="subtitle">GitHub repositories ranked by star gain over the past day, week or month, refreshed daily.</p><nav class="agent-links" aria-label="Agent feed resources"><a href="api/v1/catalog.json">JSON feed</a><a href="llms.txt">llms.txt</a><a href="docs/agent-feed.md">Feed docs</a></nav></header>
+  <header class="page-head"><h1>Star growth</h1><p class="subtitle">Every public GitHub repository above 2,000 stars, with the stars it gained over the past day, week, 15 days, month, 3 months, 6 months and year. Captured daily.</p><nav class="agent-links" aria-label="Agent feed resources"><a href="api/v2/catalog.json">JSON feed</a><a href="llms.txt">llms.txt</a><a href="docs/agent-feed.md">Feed docs</a></nav></header>
   <section class="controls" aria-label="Explore repositories">
-    <label>Window<select id="period"><option value="week">Past 7 days</option><option value="month">Past 30 days</option><option value="day">Past day</option></select></label>
-    <label>Sort by<select id="sort"><option value="gain">Star gain</option><option value="stars">Total stars</option><option value="created_at">Newest</option></select></label>
+    <label>Sort by<select id="sort"><option value="gain_1d">1 day gain</option><option value="gain_7d" selected>1 week gain</option><option value="gain_15d">15 days gain</option><option value="gain_30d">1 month gain</option><option value="gain_90d">3 months gain</option><option value="gain_180d">6 months gain</option><option value="gain_365d">1 year gain</option><option value="stars">Total stars</option><option value="created_at">Created</option><option value="full_name">Repository</option><option value="language">Language</option></select></label>
+    <label>Order<select id="direction"><option value="desc" selected>Descending</option><option value="asc">Ascending</option></select></label>
     <label class="search">Search<input id="search" type="search" placeholder="Repository name" autocomplete="off"></label>
     <label>Language<select id="language"><option value="">All languages</option></select></label>
   </section>
-  <div class="results-head"><div><h2>Repositories</h2><p id="updated" class="updated"></p></div><p id="result-count" role="status" aria-live="polite">Loading…</p></div>
-  <div class="table-wrap"><table><caption class="sr-only">Repositories sorted by the selected metric; unknown values sort last</caption><thead><tr><th scope="col" class="rank">#</th><th scope="col">Repository</th><th scope="col">Language</th><th scope="col">Created</th><th scope="col" class="num">Stars</th><th scope="col" class="num" id="gain-heading">7-day gain</th></tr></thead><tbody id="rows"></tbody></table></div>
+  <div class="results-head"><p id="result-count" role="status" aria-live="polite">Loading…</p><p id="updated" class="updated"></p></div>
+  <div class="table-wrap"><table><caption class="sr-only">Repositories sorted by the selected column; unknown values sort last. Click a column header to sort by it.</caption><thead><tr>
+    <th scope="col" class="rank">#</th>
+    <th scope="col" aria-sort="none"><button type="button" class="sort" data-key="full_name">Repository</button></th>
+    <th scope="col" aria-sort="none"><button type="button" class="sort" data-key="language">Language</button></th>
+    <th scope="col" aria-sort="none"><button type="button" class="sort" data-key="created_at">Created</button></th>
+    <th scope="col" class="num" aria-sort="none"><button type="button" class="sort" data-key="stars">Stars</button></th>
+    <th scope="col" class="num" aria-sort="none"><button type="button" class="sort" data-key="gain_1d">1 day</button></th>
+    <th scope="col" class="num" aria-sort="none"><button type="button" class="sort" data-key="gain_7d">1 week</button></th>
+    <th scope="col" class="num" aria-sort="none"><button type="button" class="sort" data-key="gain_15d">15 days</button></th>
+    <th scope="col" class="num" aria-sort="none"><button type="button" class="sort" data-key="gain_30d">1 month</button></th>
+    <th scope="col" class="num" aria-sort="none"><button type="button" class="sort" data-key="gain_90d">3 months</button></th>
+    <th scope="col" class="num" aria-sort="none"><button type="button" class="sort" data-key="gain_180d">6 months</button></th>
+    <th scope="col" class="num" aria-sort="none"><button type="button" class="sort" data-key="gain_365d">1 year</button></th>
+  </tr></thead><tbody id="rows"></tbody></table></div>
   <nav class="pagination" aria-label="Results pages"><button id="previous" type="button">Previous</button><span id="page-label"></span><button id="next" type="button">Next</button></nav>
   <p id="error" class="alert" role="alert" hidden></p>
   <noscript><p class="alert">JavaScript is needed to filter and sort this static dataset. No login or tracking is used.</p></noscript>
-  <footer><p>Repository details from the GitHub API.</p></footer>
+  <footer><p>Star gains are stars now minus stars N days ago, net of removed stars. ≈ marks a value computed from GitHub's star history until enough daily snapshots exist. Repository details from the GitHub API.</p></footer>
 </main>
 </body>
 </html>

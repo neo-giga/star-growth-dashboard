@@ -1,8 +1,9 @@
 # The `data` branch: daily star counts of every public repository above 2,000 stars
 
 An orphan branch, written once a day by `.github/workflows/daily-capture.yml` (`scripts/daily_capture.py`) and once by the
-one-time backfill (`scripts/backfill_history.py`, run on a Mac with a personal token). Nothing on `main` reads it yet; the
-page will, through `windows/latest.json`, which is the interface described last and in most detail. Forks are in the set:
+one-time backfill (`scripts/backfill_history.py`, run on a Mac with a personal token). The page is published from it by
+`.github/workflows/publish-page.yml` (`scripts/publish_page.py`) through `windows/latest.json`, which is the interface described last
+and in most detail. Forks are in the set:
 every search query says `fork:true` (34,193 repositories above 2,000 stars on 2026-10-29, 302 of them forks).
 
 All dates are **US Pacific calendar dates**: GitHub's star history is bucketed by Pacific day (measured 2026-10-29), and the

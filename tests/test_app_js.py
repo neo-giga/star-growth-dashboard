@@ -1,7 +1,9 @@
-"""Exercise the app JS helpers under node: Link-count parsing, GitHub outcome mapping, the repository record, labels."""
+"""Exercise the app JS helpers under node: the page file parser, sorting (nulls last both ways), the sort-state machine, Link-count parsing, GitHub outcome mapping, the repository record, labels."""
 import json,pathlib,re,shutil,subprocess,unittest
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 APP=ROOT/re.search(r'<script[^>]+src="([^"]+)"',(ROOT/'index.html').read_text())[1]
+def app_gains():
+ return ['gain_1d','gain_7d','gain_15d','gain_30d','gain_90d','gain_180d','gain_365d']
 def run(script):
  proc=subprocess.run(['node','-e',f"const app=require({json.dumps(str(APP))});{script}"],capture_output=True,text=True,check=True)
  return json.loads(proc.stdout)
@@ -52,12 +54,21 @@ class AppJsTests(unittest.TestCase):
    {'value':None,'cache':False,'limit':{'reset':1793171427000}},{'value':'unavailable','cache':False,'limit':None},
    [['Description','None'],['Topics','None'],['Forks','3'],['Created (UTC)','2020-01-01 00:00:00 UTC'],['Last pushed (UTC)','—'],['Archived','No']],
    [['Description','—'],['Topics','—'],['Forks','—'],['Created (UTC)','—'],['Last pushed (UTC)','—'],['Archived','—']]])
- def test_parse_feed_requires_exactly_one_feed_of_the_window(self):
-  self.assertEqual(run('''console.log(JSON.stringify([app.parseFeed({feeds:[{provider:'gittrend',period:'week',rows:[1]}]},'week').rows,app.DATA_FILES,(()=>{try{app.parseFeed({feeds:[{provider:'gittrend',period:'day',rows:[]}]},'week')}catch(e){return e.message}})(),(()=>{try{app.parseFeed({},'week')}catch(e){return e.message}})()]))'''),
-   [[1],{'day':'data-day.json','week':'data-week.json','month':'data-month.json'},'The local data file does not hold exactly one week feed.','The local data file has an invalid format.'])
+ def test_parse_data_builds_rows_from_the_columnar_page_file(self):
+  fixture=json.loads((ROOT/'tests/fixtures/windows-sample.json').read_text());page=dict(fixture,schema='star-growth-dashboard/page/1',columns={k:v for k,v in fixture['columns'].items() if k!='node_id'})
+  out=run(f"""const d=app.parseData({json.dumps(page)});console.log(JSON.stringify([d.row_count,d.rows.length,d.rows[0].full_name,d.rows[0].stars,d.rows[0].gain_7d,d.rows[0].history_mask,typeof app.sortValue(d.rows[0],'created_at'),d.rows[0].search,d.windows.map(w=>w.column),d.threshold,app.windowTooltip(d.windows[1]),
+   (()=>{{try{{app.parseData({{schema:'x'}})}}catch(e){{return e.message}}}})(),(()=>{{try{{app.parseData({json.dumps(dict(page,row_count=3))})}}catch(e){{return e.message}}}})()]))""")
+  self.assertEqual(out,[200,200,'p0deje/Maccy',22138,109,127,'number','p0deje/maccy',app_gains(),2000,"From GitHub's star history; exact daily snapshots from 2026-11-05",'The local data file has an invalid format.','The local data file has an invalid format.'])
+ def test_select_rows_sorts_nulls_last_in_both_directions_and_text_columns_by_name(self):
+  rows=json.dumps([{'full_name':'b/two','language':'Go','created_at':'2020-01-02T00:00:00Z','stars':20,'gain_7d':5,'history_mask':0},{'full_name':'a/one','language':None,'created_at':'2021-01-02T00:00:00Z','stars':10,'gain_7d':None,'history_mask':0},
+   {'full_name':'c/three','language':'Rust','created_at':None,'stars':30,'gain_7d':9,'history_mask':0},{'full_name':'d/four','language':'Rust','created_at':'2019-01-02T00:00:00Z','stars':30,'gain_7d':9,'history_mask':0}])
+  out=run(f"""const rows={rows};const names=o=>app.selectRows(rows,o).map(r=>r.full_name);console.log(JSON.stringify([names({{sort:'gain_7d',direction:'desc'}}),names({{sort:'gain_7d',direction:'asc'}}),names({{sort:'created_at',direction:'desc'}}),names({{sort:'created_at',direction:'asc'}}),
+   names({{sort:'language',direction:'asc'}}),names({{sort:'language',direction:'desc'}}),names({{sort:'full_name',direction:'asc'}}),names({{sort:'stars',direction:'desc',search:'T'}}),names({{language:'Rust'}}),names({{language:'—'}}),
+   app.nextSort({{sort:'gain_7d',direction:'desc'}},'gain_7d'),app.nextSort({{sort:'gain_7d',direction:'asc'}},'gain_7d'),app.nextSort({{sort:'gain_7d',direction:'asc'}},'stars'),app.nextSort({{sort:'stars',direction:'desc'}},'full_name'),app.DEFAULT_SORT]))""")
+  self.assertEqual(out,[['c/three','d/four','b/two','a/one'],['b/two','c/three','d/four','a/one'],['a/one','b/two','d/four','c/three'],['d/four','b/two','a/one','c/three'],
+   ['b/two','c/three','d/four','a/one'],['c/three','d/four','b/two','a/one'],['a/one','b/two','c/three','d/four'],['c/three','b/two'],['c/three','d/four'],['a/one'],
+   {'sort':'gain_7d','direction':'asc'},{'sort':'gain_7d','direction':'desc'},{'sort':'stars','direction':'desc'},{'sort':'full_name','direction':'asc'},'gain_7d'])
  def test_count_loader_rejects_unsafe_names_without_fetching(self):
   self.assertEqual(run('''(async()=>{let n=0;const load=app.createCountLoader(async()=>{n++;},{getItem:()=>null,setItem(){}});try{await load('../evil');console.log('no')}catch(e){console.log(JSON.stringify([e.message,n,app.apiRepoPath('o/.'),app.apiRepoPath('a/b c'),app.apiRepoPath('morluto/rea')]))}})()'''),['Invalid repository name',0,None,None,'morluto/rea'])
- def test_reload_once_per_missing_data_file(self):
-  script='''const m=new Map(),s={getItem:k=>m.get(k)??null,setItem:(k,v)=>m.set(k,v)},broken={getItem(){throw new Error('denied')},setItem(){}},full={getItem:()=>null,setItem(){throw new Error('quota')}};
-   console.log(JSON.stringify([app.reloadOnceFor(s,'data-month.a.json'),app.reloadOnceFor(s,'data-month.a.json'),app.reloadOnceFor(s,'data-day.b.json'),app.reloadOnceFor(null,'x'),app.reloadOnceFor(broken,'x'),app.reloadOnceFor(full,'x')]))'''
-  self.assertEqual(run(script),[True,False,True,False,False,False])
+ def test_the_app_names_its_data_file_and_columns(self):
+  self.assertEqual(run('console.log(JSON.stringify([app.DATA_FILE,app.DATA_SCHEMA,app.GAIN_COLUMNS,app.COLUMNS.map(c=>c[0])]))'),['data.json','star-growth-dashboard/page/1',app_gains(),['full_name','language','created_at','stars',*app_gains()]])
