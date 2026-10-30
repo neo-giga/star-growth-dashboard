@@ -60,7 +60,7 @@ jobs:
           python3 scripts/build_windows.py --data-dir data-branch
           # 0: staged, deploy it. 2: refused by the gate (stale, under 99% of the search total, a gain column over 1% null) or
           # failed: nothing staged, the current page stays, the run is red here. The live page's hashed assets are carried for
-          # one deploy, so a page loaded before it still finds them.
+          # one deploy, so a page loaded before it still finds them; a pre-v3 live page's are not.
           python3 scripts/publish_page.py --site-dir . --data-dir data-branch --output-dir "$RUNNER_TEMP/site" \
             --previous-site https://neo-giga.github.io/star-growth-dashboard/ --diagnostic "$RUNNER_TEMP/publish-diagnostic.json"
       - name: Preserve the diagnostic

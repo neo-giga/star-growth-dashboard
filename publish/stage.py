@@ -22,6 +22,7 @@ GAIN_COLUMNS = tuple(column(days) for days in WINDOWS)
 COLUMN_NAMES = ('node_id', 'full_name', 'language', 'created_at', 'stars', *GAIN_COLUMNS, 'history_mask')
 PUBLIC_SOURCE_FILES = ('.nojekyll', 'llms.txt', 'docs/agent-feed.md', 'docs/publish-page.yml')
 HASHED_ASSET = re.compile(r'(?:app|style|data(?:-[a-z]+)?)\.[0-9a-f]{16}\.(?:js|css|json)')
+PAGE_ASSET = re.compile(r'data\.[0-9a-f]{16}\.json')
 MAX_ASSET_BYTES = 64 * 1024 * 1024
 
 
@@ -182,14 +183,23 @@ def previous_generation(source):
         for name in re.findall(rf"'({HASHED_ASSET.pattern})'", carried[script].decode('utf-8')):
             if name.endswith('.json'):
                 carried[name] = read_previous(source, name)
-    return carried
+    return carried, gittrend_era(html, carried)
+
+
+def gittrend_era(html, carried):
+    """Why a previous generation is GitTrend's and so not carried (GitTrend is never served again, Neo 2026-10-29; a tab open across
+    that one deploy may 404), or None for a v3 publication."""
+    if not any(PAGE_ASSET.fullmatch(name) for name in carried):
+        return 'no v3 page file (data.<hash>.json)'
+    named = [name for name, data in [('index.html', html.encode('utf-8')), *carried.items()] if b'gittrend' in data.lower()]
+    return f"'gittrend' in {', '.join(named)}" if named else None
 
 
 def stage_site(site_dir, data_dir, output_dir, now=None, ignore_gate=False, previous=None):
     """Stage the site under output_dir (a new directory) from the data branch checkout, or raise GateRefused / ValueError.
     ignore_gate stages whatever the file holds (local previews only; the workflow never passes it): the problems are returned, not raised.
     previous: the previous publication (the live site's https URL or a staged site directory) whose hashed assets are carried; when it cannot be read
-    nothing is carried and the result says why (the first deploy has none; a missing courtesy copy never blocks a deploy)."""
+    or is GitTrend-era nothing is carried and the result says why (the first deploy has none; a missing courtesy copy never blocks a deploy)."""
     site, output = pathlib.Path(site_dir).resolve(), pathlib.Path(output_dir).resolve()
     if output.exists() or output == site or site in output.parents:
         raise ValueError('output must be a new directory outside the checkout')
@@ -201,7 +211,9 @@ def stage_site(site_dir, data_dir, output_dir, now=None, ignore_gate=False, prev
     carried, previous_note = {}, None
     if previous is not None:
         try:
-            carried = previous_generation(previous)
+            carried, era = previous_generation(previous)
+            if era:
+                carried, previous_note = {}, f'previous generation at {previous} is GitTrend-era ({era}); none carried'
         except Exception as exc:  # noqa: BLE001 - reported in the result, never hidden
             previous_note = f'previous generation unreadable from {previous}: {type(exc).__name__}: {str(exc)[:200]}; none carried'
     output.parent.mkdir(parents=True, exist_ok=True)

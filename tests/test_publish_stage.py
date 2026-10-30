@@ -197,14 +197,21 @@ class StageTests(unittest.TestCase):
             st.stage_site(site, data_dir(tmp, docs[2], name='d2'), tmp / 'out2', now=NOW, previous=tmp / 'out1')
             names = {p.name for p in (tmp / 'out2').iterdir()}
             self.assertLessEqual(set(new), names); self.assertNotIn(old[0], names); self.assertNotIn(old[2], names)  # one generation only
-            # today's live page is the v2 one: its three window files are carried too
+            # today's live page is the GitTrend-era one (no v3 page file, the name in its files): nothing is carried, and the result says why
             v2 = tmp / 'v2'; v2.mkdir(); app, css = 'app.e8403d73240a1990.js', 'style.82a1b69b09437942.css'
             (v2 / 'index.html').write_text(f'<link rel="icon" href="data:,"><link href="{css}"><script src="{app}"></script><a href="api/v1/catalog.json"></a>')
             windows = [f'data-{w}.{h}.json' for w, h in (('day', '18fd23d482942271'), ('week', 'b69ecdadbcb420d7'), ('month', '43d945287bfad983'))]
             (v2 / app).write_text("const NOTE = 'it\\'s'; " + ' '.join(f"'{n}'" for n in windows)); (v2 / css).write_text('body{}')  # an escaped quote first
             for name in windows:
                 (v2 / name).write_text('{}')
-            self.assertEqual(sorted(st.previous_generation(v2)), sorted([app, css, *windows]))
+            result = st.stage_site(site, data_dir(tmp, docs[0], name='d4'), tmp / 'out4', now=NOW, previous=v2)
+            self.assertEqual(result['previous_generation'], []); self.assertIn('no v3 page file', result['previous_generation_note'])
+            self.assertFalse({app, css, *windows} & {p.name for p in (tmp / 'out4').iterdir()})
+            # a v3-shaped publication whose files name GitTrend is not carried either (case-insensitive)
+            gt = tmp / 'gt'; shutil.copytree(tmp / 'out0', gt); (gt / old[0]).write_text((gt / old[0]).read_text() + '\n// GitTrend\n')
+            result = st.stage_site(site, data_dir(tmp, docs[1], name='d5'), tmp / 'out5', now=NOW, previous=gt)
+            self.assertEqual(result['previous_generation'], []); self.assertIn(f"'gittrend' in {old[0]}", result['previous_generation_note'])
+            self.assertFalse({old[0], old[2]} & {p.name for p in (tmp / 'out5').iterdir()})  # the stylesheet is unchanged, so this build has it
             # an unreadable previous publication carries nothing, says why, and does not block the deploy
             result = st.stage_site(site, data_dir(tmp, docs[0], name='d3'), tmp / 'out3', now=NOW, previous=tmp / 'missing')
             self.assertEqual(result['previous_generation'], []); self.assertIn('previous generation unreadable', result['previous_generation_note'])
