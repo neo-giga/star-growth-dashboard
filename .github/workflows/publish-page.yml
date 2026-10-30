@@ -4,7 +4,8 @@
 # changes the page or its scripts, and on dispatch. Nothing is committed to git: the site is rebuilt as the Pages artifact from the
 # repository's UI sources plus the data branch, and deployed exactly as staged. The gate (scripts/publish_page.py) fails closed: a
 # file older than 36 h, a row count under 99% of that day's search total, or a gain column null for more than 1% of rows ends the
-# run red before the upload and deploy steps, and the current page stays.
+# run red before the upload and deploy steps, and the current page stays. A column a missed capture left without its baseline
+# (on or after its exact_since) is exempt from the null rule for that day.
 name: Publish the page
 on:
   workflow_run:

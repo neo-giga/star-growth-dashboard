@@ -2,7 +2,8 @@
 
 The gate fails closed (the run goes red, nothing is deployed, the current page stays) when the file is older than MAX_AGE_HOURS,
 when `row_count` is under COVERAGE_FLOOR of the search total in that day's diagnostic, or when any gain column is null for more
-than NULL_CEILING of the rows. The staged site is the checkout's UI sources (hashed by scripts/build_static_release.py) plus the
+than NULL_CEILING of the rows, unless a missed capture explains it (missed_capture_columns).
+The staged site is the checkout's UI sources (hashed by scripts/build_static_release.py) plus the
 page file (the columnar interface without the node IDs) and the agent feed under api/v2, plus the previous publication's hashed
 script, stylesheet and data files (one generation) so a page loaded before the deploy still finds them. Nothing is committed to git.
 """
@@ -86,7 +87,7 @@ def gate(doc, diagnostic, now):
     generated = parse_instant(doc['generated_at'])
     age_hours = (now - generated).total_seconds() / 3600
     measurements = {'generated_at': doc['generated_at'], 'age_hours': round(age_hours, 2), 'max_age_hours': MAX_AGE_HOURS, 'row_count': doc['row_count'],
-                    'search_total': None, 'coverage': None, 'coverage_floor': COVERAGE_FLOOR, 'null_share': {}, 'null_ceiling': NULL_CEILING}
+                    'search_total': None, 'coverage': None, 'coverage_floor': COVERAGE_FLOOR, 'null_share': {}, 'null_ceiling': NULL_CEILING, 'null_exempt': missed_capture_columns(doc)}
     if age_hours > MAX_AGE_HOURS:
         problems.append(f'windows file is {age_hours:.1f} h old (generated {doc["generated_at"]}), over {MAX_AGE_HOURS} h')
     total = None
@@ -103,9 +104,18 @@ def gate(doc, diagnostic, now):
         nulls = sum(1 for value in doc['columns'][name] if value is None)
         share = nulls / doc['row_count'] if doc['row_count'] else 1.0
         measurements['null_share'][name] = round(share, 4)
-        if share > NULL_CEILING:
+        if share > NULL_CEILING and name not in measurements['null_exempt']:
             problems.append(f'{name} is null for {nulls} of {doc["row_count"]} rows ({share:.1%}), over {NULL_CEILING:.0%}')
     return problems, measurements
+
+
+def missed_capture_columns(doc):
+    """The gain columns a missed capture N days ago leaves without a baseline today: on or after the window's exact_since (so the
+    snapshot ring is deep enough) yet no baseline was read (baseline_date null). PR A then serves the column from history, which
+    rarely reaches that far back, so it is mostly null for one day; the null rule exempts it rather than block a publish on each
+    of up to 7 later days. Before exact_since a null-heavy column is the missing backfill, and the rule holds."""
+    date = dt.date.fromisoformat(doc['date'])
+    return [w['column'] for w in doc['windows'] if w.get('baseline_date') is None and isinstance(w.get('exact_since'), str) and date >= dt.date.fromisoformat(w['exact_since'])]
 
 
 def page_file(doc):

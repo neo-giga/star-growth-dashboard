@@ -70,5 +70,10 @@ class AppJsTests(unittest.TestCase):
    {'sort':'gain_7d','direction':'asc'},{'sort':'gain_7d','direction':'desc'},{'sort':'stars','direction':'desc'},{'sort':'full_name','direction':'asc'},'gain_7d'])
  def test_count_loader_rejects_unsafe_names_without_fetching(self):
   self.assertEqual(run('''(async()=>{let n=0;const load=app.createCountLoader(async()=>{n++;},{getItem:()=>null,setItem(){}});try{await load('../evil');console.log('no')}catch(e){console.log(JSON.stringify([e.message,n,app.apiRepoPath('o/.'),app.apiRepoPath('a/b c'),app.apiRepoPath('morluto/rea')]))}})()'''),['Invalid repository name',0,None,None,'morluto/rea'])
+ def test_a_column_nulled_by_a_missed_capture_gets_its_header_note(self):
+  w=lambda **k:dict({'column':'gain_7d','days':7,'source':'history','exact_since':'2026-11-05','baseline_date':None},**k)
+  self.assertEqual(run(f"""console.log(JSON.stringify([app.windowNote({json.dumps(w())},'2026-11-04'),app.windowNote({json.dumps(w())},'2026-11-05'),app.windowNote({json.dumps(w(column='gain_1d',days=1,exact_since='2026-10-30'))},'2026-11-01'),
+   app.windowNote({json.dumps(w(source='snapshot',baseline_date='2026-10-30'))},'2026-11-06'),app.windowNote({json.dumps(w(exact_since=None))},'2026-11-06')]))"""),
+   [None,'Not available today: the capture 7 days ago was missed','Not available today: the capture 1 day ago was missed',None,None])
  def test_the_app_names_its_data_file_and_columns(self):
   self.assertEqual(run('console.log(JSON.stringify([app.DATA_FILE,app.DATA_SCHEMA,app.GAIN_COLUMNS,app.COLUMNS.map(c=>c[0])]))'),['data.json','star-growth-dashboard/page/1',app_gains(),['full_name','language','created_at','stars',*app_gains()]])

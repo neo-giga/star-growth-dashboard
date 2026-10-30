@@ -78,6 +78,19 @@ class GateTests(unittest.TestCase):
         doc['columns']['gain_1d'] = [None] * 200
         self.assertEqual([p.split(' is null')[0] for p in st.gate(doc, diagnostic(), NOW)[0]], ['gain_1d', 'gain_30d'])
 
+    def test_a_column_nulled_by_a_missed_capture_is_exempt_only_on_or_after_its_exact_since(self):
+        # PR A r3: when the snapshot N days back is missing, the N-day column is history-sourced with baseline_date null and mostly
+        # null that day. From exact_since on that can only be a missed capture: exempt. Before it the rule holds (the backfill gate).
+        doc = copy.deepcopy(FIXTURE); doc['columns']['gain_7d'] = [None] * 200  # gain_7d: exact_since 2026-11-05, baseline_date null
+        doc['windows'][0] = dict(doc['windows'][0], source='snapshot', baseline_date='2026-11-03')  # 1 d has its baseline on these days
+        for date, refused in (('2026-11-04', True), ('2026-11-05', False), ('2026-11-06', False)):
+            with self.subTest(date=date):
+                problems, measured = st.gate(dict(doc, date=date), diagnostic(date=date), NOW)
+                self.assertEqual(problems, ['gain_7d is null for 200 of 200 rows (100.0%), over 1%'] if refused else [])
+                self.assertEqual(measured['null_share']['gain_7d'], 1.0); self.assertEqual(measured['null_exempt'], [] if refused else ['gain_7d'])
+        snapshot = copy.deepcopy(doc); snapshot['windows'][1] = dict(doc['windows'][1], source='snapshot', baseline_date='2026-10-30')
+        self.assertEqual(len(st.gate(dict(snapshot, date='2026-11-06'), diagnostic(date='2026-11-06'), NOW)[0]), 1)  # a baseline was read: the rule holds
+
     def test_every_problem_is_listed_at_once(self):
         doc = copy.deepcopy(FIXTURE); doc['columns']['gain_365d'][:5] = [None] * 5
         problems, _ = st.gate(doc, diagnostic(total=250), NOW + dt.timedelta(days=2))

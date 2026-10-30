@@ -18,13 +18,14 @@ def step_script(name):
     return re.search(rf'      - name: {re.escape(name)}\n(?:        (?!run: \|).*\n)*        run: \|\n((?:          .*\n)+)', WORKFLOW)[1]
 
 
-def data_branch(root, captured_at, total=200, drop_90d=0):
+def data_branch(root, captured_at, total=200, drop_90d=0, missed=()):
     """A checkout of the data branch as the capture commits it (no windows/latest.json): 200 repos, a snapshot today and N days
-    before for every window, a year of snapshots behind it; `drop_90d` repos missing from the 90-day baseline (no history: null)."""
+    before for every window, a year of snapshots behind it; `drop_90d` repos missing from the 90-day baseline (no history: null);
+    `missed`: windows whose baseline day's capture did not run."""
     data, date = DataDir(root), pacific_date(captured_at)
     repos = {f'R_{i:03}': {'full_name': f'o/r{i}', 'language': 'Go', 'created_at': '2020-01-01T00:00:00Z', 'first_seen': '2025-01-01'} for i in range(200)}
     data.write_repos({'threshold': 2000, 'updated_at': captured_at.isoformat(), 'repos': repos})
-    for days in (0, *WINDOWS):
+    for days in (0, *(days for days in WINDOWS if days not in missed)):
         counts = {node_id: 5000 + i - days for i, node_id in enumerate(repos)}
         if days == 90:
             counts = dict(list(counts.items())[drop_90d:])
@@ -83,15 +84,16 @@ class PublishWorkflowTests(unittest.TestCase):
         self.assertLess(stage.index('python3 scripts/build_windows.py --data-dir data-branch'), stage.index('python3 scripts/publish_page.py'))  # built, then gated
         now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
         good, stale = now - dt.timedelta(hours=2), now - dt.timedelta(hours=37)
-        cases = {'stale': (stale, 200, 0, 'over 36 h'), 'low-coverage': (good, 205, 0, 'under 99% of the search total 205'), 'null-heavy': (good, 200, 3, 'gain_90d is null for 3 of 200 rows (1.5%)'), 'good': (good, 200, 0, None)}
+        cases = {'stale': (stale, 200, 0, (), 'over 36 h'), 'low-coverage': (good, 205, 0, (), 'under 99% of the search total 205'), 'null-heavy': (good, 200, 3, (), 'gain_90d is null for 3 of 200 rows (1.5%)'),
+                 'good': (good, 200, 0, (), None), 'missed-7-days-ago': (good, 200, 0, (7,), None)}
         with tempfile.TemporaryDirectory() as tmp:
             tmp = pathlib.Path(tmp)
-            for case, (captured_at, total, drop, problem) in cases.items():
+            for case, (captured_at, total, drop, missed, problem) in cases.items():
                 with self.subTest(case=case):
                     work = tmp / case; work.mkdir()
                     for name in SITE_FILES:
                         (work / name).parent.mkdir(parents=True, exist_ok=True); shutil.copyfile(ROOT / name, work / name)
-                    data_branch(work / 'data-branch', captured_at, total, drop)
+                    data_branch(work / 'data-branch', captured_at, total, drop, missed)
                     runner = tmp / f'runner-{case}'; runner.mkdir()
                     env = dict(os.environ, RUNNER_TEMP=str(runner), PATH=f'{pathlib.Path(sys.executable).parent}{os.pathsep}{os.environ["PATH"]}')
                     proc = subprocess.run(['bash', '-e', '-c', stage], cwd=work, capture_output=True, text=True, env=env)
@@ -102,7 +104,8 @@ class PublishWorkflowTests(unittest.TestCase):
                     else:
                         self.assertEqual(proc.returncode, 0, proc.stderr); self.assertEqual(diagnostic['status'], 'ok'); self.assertEqual(diagnostic['row_count'], 200)
                         self.assertTrue((runner / 'site/index.html').is_file()); self.assertTrue((runner / 'site/api/v2/catalog.json').is_file())
-                        self.assertEqual([w['source'] for w in diagnostic['windows']], ['snapshot'] * 7)  # read from the rebuilt file
+                        self.assertEqual([w['source'] for w in diagnostic['windows']], ['history' if w in missed else 'snapshot' for w in WINDOWS])  # read from the rebuilt file
+                        self.assertEqual(diagnostic['measurements']['null_exempt'], [f'gain_{days}d' for days in missed])  # the missed day's column is all null, yet staged
             work = tmp / 'no-capture'; shutil.copytree(tmp / 'good', work, ignore=shutil.ignore_patterns('data-branch'))
             DataDir(work / 'data-branch').write_meta({})  # the branch exists but holds no capture: build_windows.py exits 2
             runner = tmp / 'runner-no-capture'; runner.mkdir()

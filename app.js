@@ -69,6 +69,12 @@ function parseData(data) {
 function windowTooltip(window) {
   return `From GitHub's star history; exact daily snapshots from ${window && window.exact_since ? window.exact_since : UNKNOWN}`;
 }
+/* A window whose snapshot ring is deep enough (date on or after exact_since) but read no baseline: the capture N days ago was missed. */
+function windowNote(window, date) {
+  const days = window ? numeric(window.days) : null;
+  if (days === null || window.baseline_date != null || typeof window.exact_since !== 'string' || typeof date !== 'string' || date < window.exact_since) return null;
+  return `Not available today: the capture ${days} day${days === 1 ? '' : 's'} ago was missed`;
+}
 /* A row's value for a sort key: null sorts last in both directions. */
 function sortValue(row, key) {
   if (key === 'created_at') { if (row.created === undefined) row.created = creationTime(row.created_at); return row.created; }
@@ -170,7 +176,7 @@ function createCountLoader(fetcher, storage, now = () => Date.now()) {
     return result;
   };
 }
-if (typeof module !== 'undefined') module.exports = {numeric, creationTime, creationLabel, repoURL, displayNumber, timeLabel, clockLabel, parseData, windowTooltip, sortValue, selectRows, nextSort, metadataFields, linkCount, countOutcome, repoOutcome, countLabel, apiRepoPath, createCountLoader, COLUMNS, GAIN_COLUMNS, GITHUB_COUNTS, DATA_FILE, DATA_SCHEMA, DEFAULT_SORT};
+if (typeof module !== 'undefined') module.exports = {numeric, creationTime, creationLabel, repoURL, displayNumber, timeLabel, clockLabel, parseData, windowTooltip, windowNote, sortValue, selectRows, nextSort, metadataFields, linkCount, countOutcome, repoOutcome, countLabel, apiRepoPath, createCountLoader, COLUMNS, GAIN_COLUMNS, GITHUB_COUNTS, DATA_FILE, DATA_SCHEMA, DEFAULT_SORT};
 if (typeof document !== 'undefined') {
   const el = id => document.getElementById(id);
   let data = null, page = 1, state = {sort: DEFAULT_SORT, direction: 'desc'};
@@ -198,14 +204,18 @@ if (typeof document !== 'undefined') {
       else note.textContent = `From the GitHub API, fetched ${clockLabel(result.fetched_at)}`;
     }, () => { for (const key in cells) cells[key].textContent = UNKNOWN; note.textContent = 'GitHub details unavailable.'; });
   }
-  /* Header buttons carry the sort state; a history-sourced window gets its ≈ marker and tooltip once, when the data arrives. */
+  /* Header buttons carry the sort state; a history-sourced window gets its ≈ marker and tooltip once, when the data arrives, or the
+     missed-capture note instead. */
   function renderHeaders() {
     for (const button of document.querySelectorAll('th button.sort')) {
       const key = button.dataset.key, th = button.parentElement, active = key === state.sort;
       th.setAttribute('aria-sort', active ? (state.direction === 'asc' ? 'ascending' : 'descending') : 'none');
       th.classList.toggle('sorted', active);
       const window = data && data.windows.find(w => w.column === key);
-      if (window && window.source === 'history' && !button.querySelector('.approx')) {
+      const note = windowNote(window, data && data.date);
+      if (note && !button.querySelector('.missed')) {
+        const mark = node('span', 'n/a', 'missed'); mark.title = note; mark.setAttribute('aria-hidden', 'true'); button.append(mark, node('span', note, 'sr-only'));
+      } else if (!note && window && window.source === 'history' && !button.querySelector('.approx')) {
         const mark = node('span', '≈', 'approx'); mark.title = windowTooltip(window); button.append(mark);
       }
     }

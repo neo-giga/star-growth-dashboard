@@ -31,6 +31,7 @@ th.sorted button.sort::after{content:"↓";margin-left:4px;color:var(--accent)}
 th.sorted[aria-sort=ascending] button.sort::after{content:"↑"}
 .approx{color:var(--muted);font-weight:400;cursor:help}
 th .approx{margin-left:4px}
+.missed{color:var(--muted);font-weight:400;font-size:.8em;margin-left:4px;cursor:help}
 td.approx{text-decoration:underline dotted var(--muted);text-underline-offset:3px;cursor:help}
 td{padding:12px;border-bottom:1px solid var(--line);vertical-align:top}
 td:first-child{padding-left:16px}td:last-child{padding-right:16px}

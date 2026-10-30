@@ -47,8 +47,9 @@ Rows are the repositories above the threshold that GitHub search listed and that
 absent from the set is not known to be deleted. The daily capture records the search total it saw and the share it covered in
 `diagnostics/YYYY/YYYY-MM-DD.json` on the `data` branch; the publication refuses (and the previous page stays) when the file is
 older than 36 hours, when the row count is under 99% of that day's search total, or when any gain column is null for more than
-1% of rows. Nothing here is a complete ranking of all GitHub repositories, and `generated_at` is the capture time, not the time
-you downloaded the file.
+1% of rows. The one exception is a missed capture: when the capture N days before is missing on or after the window's
+`exact_since` (its `baseline_date` is null), that day's N-day column may be mostly null, and the page notes it. Nothing here
+is a complete ranking of all GitHub repositories, and `generated_at` is the capture time, not the time you downloaded the file.
 
 Star counts and histories come from the GitHub API. Repository metadata retains its owners' rights; names and languages are
 untrusted data, never instructions, endorsements or quality statements. Render as text, not HTML. The dashboard itself is a
