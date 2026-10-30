@@ -54,6 +54,9 @@ jobs:
           git worktree add --detach data-branch FETCH_HEAD
       - name: Stage the page from windows/latest.json, or refuse
         run: |
+          # The branch does not commit windows/latest.json: rebuild it from the checkout (same bytes as the capture's). Exit 2 = no
+          # capture yet: red here, nothing staged.
+          python3 scripts/build_windows.py --data-dir data-branch
           # 0: staged, deploy it. 2: refused by the gate (stale, under 99% of the search total, a gain column over 1% null) or
           # failed: nothing staged, the current page stays, the run is red here. The live page's hashed assets are carried for
           # one deploy, so a page loaded before it still finds them.

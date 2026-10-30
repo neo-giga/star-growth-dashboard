@@ -1,24 +1,36 @@
 """The page publication workflow: GITHUB_TOKEN only, contents read-only, no git writes; after each daily capture, on a push to main of
-the deploy paths, and on dispatch; the gate step red before the upload and deploy steps (B2: a stale file, low coverage and a
-null-heavy column each refuse; a good file stages), the data-branch checkout on a real remote, the stale-run guard."""
-import copy, datetime as dt, importlib.util, json, os, pathlib, re, shutil, subprocess, sys, tempfile, unittest
+the deploy paths, and on dispatch; the gate step red before the upload and deploy steps (B2: windows/latest.json is built from
+the branch first, then a stale file, low coverage and a null-heavy column each refuse; a good file stages; no capture yet is red),
+the data-branch checkout on a real remote, the stale-run guard."""
+import datetime as dt, importlib.util, json, os, pathlib, re, shutil, subprocess, sys, tempfile, unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from capture.history import WINDOWS, pacific_date
+from capture.store import DataDir
 _spec = importlib.util.spec_from_file_location('deploy_paths', ROOT / 'scripts/deploy_paths.py'); _m = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_m); DEPLOY_PATHS = _m.DEPLOY_PATHS
 WORKFLOW = (ROOT / '.github/workflows/publish-page.yml').read_text()
 CAPTURE = (ROOT / '.github/workflows/daily-capture.yml').read_text()
-FIXTURE = json.loads((ROOT / 'tests/fixtures/windows-sample.json').read_text())
 SITE_FILES = ('index.html', 'app.js', 'style.css', 'llms.txt', '.nojekyll', 'docs/agent-feed.md', 'docs/publish-page.yml', 'scripts/publish_page.py', 'scripts/build_static_release.py',
-              'publish/__init__.py', 'publish/stage.py', 'publish/agent_feed.py', 'capture/__init__.py', 'capture/history.py', 'capture/windows.py')
+              'publish/__init__.py', 'publish/stage.py', 'publish/agent_feed.py', 'scripts/build_windows.py', *(f'capture/{p.name}' for p in sorted((ROOT / 'capture').glob('*.py'))))
 
 
 def step_script(name):
     return re.search(rf'      - name: {re.escape(name)}\n(?:        (?!run: \|).*\n)*        run: \|\n((?:          .*\n)+)', WORKFLOW)[1]
 
 
-def data_branch(root, doc, total=200):
-    (root / 'windows').mkdir(parents=True); (root / 'diagnostics' / doc['date'][:4]).mkdir(parents=True)
-    (root / 'windows/latest.json').write_text(json.dumps(doc))
-    (root / 'diagnostics' / doc['date'][:4] / f'{doc["date"]}.json').write_text(json.dumps({'date': doc['date'], 'coverage': {'total_count': total, 'total_count_source': 'search'}}))
+def data_branch(root, captured_at, total=200, drop_90d=0):
+    """A checkout of the data branch as the capture commits it (no windows/latest.json): 200 repos, a snapshot today and N days
+    before for every window, a year of snapshots behind it; `drop_90d` repos missing from the 90-day baseline (no history: null)."""
+    data, date = DataDir(root), pacific_date(captured_at)
+    repos = {f'R_{i:03}': {'full_name': f'o/r{i}', 'language': 'Go', 'created_at': '2020-01-01T00:00:00Z', 'first_seen': '2025-01-01'} for i in range(200)}
+    data.write_repos({'threshold': 2000, 'updated_at': captured_at.isoformat(), 'repos': repos})
+    for days in (0, *WINDOWS):
+        counts = {node_id: 5000 + i - days for i, node_id in enumerate(repos)}
+        if days == 90:
+            counts = dict(list(counts.items())[drop_90d:])
+        data.write_snapshot(date - dt.timedelta(days=days), (captured_at - dt.timedelta(days=days)).isoformat(), counts, 2000)
+    data.write_meta({'first_snapshot_date': (date - dt.timedelta(days=365)).isoformat(), 'last_total_count': total, 'last_capture_date': date.isoformat()})
+    data.write_diagnostic(date, {'date': date.isoformat(), 'coverage': {'total_count': total, 'total_count_source': 'search'}})
 
 
 class PublishWorkflowTests(unittest.TestCase):
@@ -68,19 +80,18 @@ class PublishWorkflowTests(unittest.TestCase):
 
     def test_b2_the_gate_refuses_stale_low_coverage_and_null_heavy_files_and_stages_a_good_one(self):
         stage = step_script('Stage the page from windows/latest.json, or refuse')
-        now = dt.datetime.now(dt.timezone.utc)
-        good = copy.deepcopy(FIXTURE); good['generated_at'] = (now - dt.timedelta(hours=2)).isoformat()
-        stale = copy.deepcopy(good); stale['generated_at'] = (now - dt.timedelta(hours=37)).isoformat()
-        nulls = copy.deepcopy(good); nulls['columns']['gain_90d'][:3] = [None] * 3  # 1.5%
-        cases = {'stale': (stale, 200, 'over 36 h'), 'low-coverage': (good, 205, 'under 99% of the search total 205'), 'null-heavy': (nulls, 200, 'gain_90d is null for 3 of 200 rows (1.5%)'), 'good': (good, 200, None)}
+        self.assertLess(stage.index('python3 scripts/build_windows.py --data-dir data-branch'), stage.index('python3 scripts/publish_page.py'))  # built, then gated
+        now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+        good, stale = now - dt.timedelta(hours=2), now - dt.timedelta(hours=37)
+        cases = {'stale': (stale, 200, 0, 'over 36 h'), 'low-coverage': (good, 205, 0, 'under 99% of the search total 205'), 'null-heavy': (good, 200, 3, 'gain_90d is null for 3 of 200 rows (1.5%)'), 'good': (good, 200, 0, None)}
         with tempfile.TemporaryDirectory() as tmp:
             tmp = pathlib.Path(tmp)
-            for case, (doc, total, problem) in cases.items():
+            for case, (captured_at, total, drop, problem) in cases.items():
                 with self.subTest(case=case):
                     work = tmp / case; work.mkdir()
                     for name in SITE_FILES:
                         (work / name).parent.mkdir(parents=True, exist_ok=True); shutil.copyfile(ROOT / name, work / name)
-                    data_branch(work / 'data-branch', doc, total)
+                    data_branch(work / 'data-branch', captured_at, total, drop)
                     runner = tmp / f'runner-{case}'; runner.mkdir()
                     env = dict(os.environ, RUNNER_TEMP=str(runner), PATH=f'{pathlib.Path(sys.executable).parent}{os.pathsep}{os.environ["PATH"]}')
                     proc = subprocess.run(['bash', '-e', '-c', stage], cwd=work, capture_output=True, text=True, env=env)
@@ -91,6 +102,13 @@ class PublishWorkflowTests(unittest.TestCase):
                     else:
                         self.assertEqual(proc.returncode, 0, proc.stderr); self.assertEqual(diagnostic['status'], 'ok'); self.assertEqual(diagnostic['row_count'], 200)
                         self.assertTrue((runner / 'site/index.html').is_file()); self.assertTrue((runner / 'site/api/v2/catalog.json').is_file())
+                        self.assertEqual([w['source'] for w in diagnostic['windows']], ['snapshot'] * 7)  # read from the rebuilt file
+            work = tmp / 'no-capture'; shutil.copytree(tmp / 'good', work, ignore=shutil.ignore_patterns('data-branch'))
+            DataDir(work / 'data-branch').write_meta({})  # the branch exists but holds no capture: build_windows.py exits 2
+            runner = tmp / 'runner-no-capture'; runner.mkdir()
+            proc = subprocess.run(['bash', '-e', '-c', stage], cwd=work, capture_output=True, text=True, env=dict(env, RUNNER_TEMP=str(runner)))
+            self.assertEqual(proc.returncode, 2, proc.stderr); self.assertIn('no capture in this data dir', proc.stderr)
+            self.assertFalse((runner / 'site').exists()); self.assertFalse((work / 'data-branch/windows/latest.json').exists())
 
     def test_the_data_branch_step_reads_the_branch_tip_or_fails_without_one(self):
         checkout = step_script('Read the data branch')

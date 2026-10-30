@@ -59,8 +59,9 @@ personal project.
 The page and this feed are rebuilt by [`publish-page.yml`](publish-page.yml) (installed at
 `.github/workflows/publish-page.yml`) after every run of the daily capture workflow, on a push to `main` that changes the page
 or its scripts, and on demand (Actions → Publish the page → Run workflow). Nothing is committed to git: each run builds the
-whole site as the Pages artifact from the repository's UI sources plus the `data` branch's `windows/latest.json` and deploys it
-exactly as staged; a run deploys only while its UI/script sources still match live `main`'s. Its job permissions are
+whole site as the Pages artifact from the repository's UI sources plus `windows/latest.json`, rebuilt from the `data` branch
+(`scripts/build_windows.py`), and deploys it exactly as staged; a run deploys only while its UI/script sources still match live
+`main`'s. Its job permissions are
 contents:read, pages:write and id-token:write for this public repository only, using the job's GITHUB_TOKEN. The v1 feed
 (`api/v1`, provider-reported day/week/month lists) is no longer published.
 
