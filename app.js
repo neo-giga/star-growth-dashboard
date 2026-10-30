@@ -231,6 +231,8 @@ if (typeof document !== 'undefined') {
     el('result-count').textContent = sorted.length === rows.length ? `${total} repositories${threshold}` : `${sorted.length.toLocaleString('en-US')} of ${total} repositories${threshold}`;
     el('updated').textContent = timeLabel(data.generated_at) !== UNKNOWN ? `Updated ${timeLabel(data.generated_at).slice(0, 16)} UTC` : '';
     renderHeaders();
+    const note = windowNote(windows.find(w => w.column === chosen), data.date);  /* cards have no header row to carry it */
+    el('sort-note').textContent = note || ''; el('sort-note').hidden = !note;
     for (const [index, row] of sorted.slice(offset, offset + PAGE_SIZE).entries()) {
       const tr = node('tr'), repo = node('td', undefined, 'repo'), url = repoURL(row.full_name);
       const title = node(url ? 'a' : 'span', row.full_name || UNKNOWN, 'repo-name');

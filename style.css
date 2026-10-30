@@ -32,6 +32,7 @@ th.sorted[aria-sort=ascending] button.sort::after{content:"↑"}
 .approx{color:var(--muted);font-weight:400;cursor:help}
 th .approx{margin-left:4px}
 .missed{color:var(--muted);font-weight:400;font-size:.8em;margin-left:4px;cursor:help}
+.sort-note{display:none;margin:-12px 0 16px;color:var(--muted);font-size:13px}
 td.approx{text-decoration:underline dotted var(--muted);text-underline-offset:3px;cursor:help}
 td{padding:12px;border-bottom:1px solid var(--line);vertical-align:top}
 td:first-child{padding-left:16px}td:last-child{padding-right:16px}
@@ -71,6 +72,7 @@ main{padding:24px 16px 48px}
 h1{font-size:24px}
 .results-head{flex-direction:column;align-items:flex-start;gap:4px}
 .updated{white-space:normal}
+.sort-note{display:block}
 thead{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
 table,tbody{display:block}
 tbody tr{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 8px;padding:12px 16px;border-bottom:1px solid var(--line)}
