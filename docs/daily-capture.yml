@@ -1,0 +1,105 @@
+# INSTALLED at .github/workflows/daily-capture.yml (keep this copy identical).
+# Daily star-count capture of every public repository above the threshold, committed to the orphan `data` branch and kept forever.
+# Separate from the public feed refresh (weekly-refresh.yml) so it reverts on its own: its own concurrency group, GITHUB_TOKEN only
+# (no new secret), write access to the repository granted to this one job only, and no Pages step. Losing a day of data is worse than a red run: the day's
+# files are committed whatever the capture's exit code, and the run goes red afterwards when coverage is under the floor.
+name: Daily star capture
+on:
+  schedule:
+    - cron: '30 5 * * *'  # 05:30 UTC = 22:30 PDT / 21:30 PST: before the 07:23 UTC feed refresh and clear of Pacific midnight (the snapshot's date)
+  workflow_dispatch:
+    inputs:
+      threshold:
+        description: 'Capture repositories with more stars than this'
+        type: string
+        default: '2000'
+      skip_discovery:
+        description: 'Snapshot the known set only; no search for new repositories'
+        type: boolean
+        default: false
+permissions:
+  contents: read
+concurrency:
+  group: daily-star-capture
+  cancel-in-progress: false
+jobs:
+  capture:
+    if: github.repository == 'neo-giga/star-growth-dashboard' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    permissions:
+      contents: write  # commit the day's files to the data branch; this job only
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Unit checks (no network fixtures)
+        run: python3 -m unittest discover -s tests
+      - name: Check out the data branch, or start it
+        run: |
+          for attempt in 1 2 3; do
+            if git fetch --no-tags --depth=1 origin data; then
+              git worktree add --detach data-branch FETCH_HEAD; exit 0
+            fi
+            # Only a branch the remote says is missing (ls-remote exit 2) starts an orphan; a failed fetch of an existing one must not.
+            status=0; git ls-remote --exit-code --heads origin data > /dev/null || status=$?
+            if [ "$status" = 2 ]; then git worktree add --orphan -b data data-branch; exit 0; fi
+            sleep $((attempt * 15))
+          done
+          echo "the data branch exists (or the remote is unreachable) but could not be fetched three times: not starting an empty one" >&2
+          exit 1
+      - name: Capture today's star counts
+        id: capture
+        env:
+          GH_TOKEN: ${{ github.token }}
+          THRESHOLD: ${{ inputs.threshold || '2000' }}
+          SKIP_DISCOVERY: ${{ inputs.skip_discovery && '--skip-discovery' || '' }}
+        run: |
+          set +e
+          python3 scripts/daily_capture.py --data-dir data-branch --threshold "$THRESHOLD" $SKIP_DISCOVERY --workers 4 --deadline-minutes 75 \
+            --diagnostic "$RUNNER_TEMP/capture-diagnostic.json"
+          code=$?
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          # 0: fine. 3: written, but coverage is under the floor. Anything else: a crash. The files are committed first in every case.
+          exit 0
+      - name: Commit the day's files to the data branch
+        if: always()
+        run: |
+          cd data-branch
+          # One identity for every commit this step makes, the cherry-pick that replays it on a moved tip included.
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          if git diff --cached --quiet; then echo "nothing to commit"; exit 0; fi
+          git commit -q -m "capture $(date -u +%F)"
+          ours=$(git rev-parse HEAD)
+          for attempt in 1 2 3; do
+            if git push origin HEAD:refs/heads/data; then exit 0; fi
+            # Someone else pushed to data meanwhile (the backfill): replay today's commit on the new tip and push again.
+            git fetch --no-tags --depth=1 origin data
+            git checkout -q --detach FETCH_HEAD
+            if ! git cherry-pick "$ours"; then
+              git format-patch -1 "$ours" --stdout > "$RUNNER_TEMP/unpushed-data-commit.patch"
+              echo "today's commit conflicts with the data branch: saved as the unpushed-data-commit.patch artifact" >&2
+              exit 1
+            fi
+            ours=$(git rev-parse HEAD)
+          done
+          git format-patch -1 "$ours" --stdout > "$RUNNER_TEMP/unpushed-data-commit.patch"
+          echo "push to data failed three times: saved as the unpushed-data-commit.patch artifact" >&2
+          exit 1
+      - name: Preserve the diagnostic (and an unpushed commit)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: capture-diagnostic-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/capture-diagnostic.json
+            ${{ runner.temp }}/unpushed-data-commit.patch
+          retention-days: 14
+          if-no-files-found: ignore
+      - name: Fail the run when coverage is under the floor
+        if: steps.capture.outputs.code != '0'
+        run: |
+          echo "capture exit code ${{ steps.capture.outputs.code }} (3 = coverage under 99% of the search total; see capture-diagnostic-${{ github.run_id }})" >&2
+          exit 1
