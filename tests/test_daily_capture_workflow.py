@@ -1,7 +1,7 @@
 """The daily capture workflow: GITHUB_TOKEN only, contents: write on its one job only, no Pages, its own concurrency group, the
 day's files committed before the run can go red, and the commit step's shell exercised on a real git remote (orphan start,
-existing branch, a concurrent push)."""
-import os, pathlib, re, subprocess, tempfile, unittest
+existing branch, a failed fetch, a concurrent push)."""
+import os, pathlib, re, shutil, subprocess, tempfile, unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKFLOW = (ROOT / '.github/workflows/daily-capture.yml').read_text()
 WEEKLY = (ROOT / '.github/workflows/weekly-refresh.yml').read_text()
@@ -69,7 +69,7 @@ class DailyCaptureWorkflowTests(unittest.TestCase):
             (tmp / 'work').mkdir(); git('init', '-q', '-b', 'main'); (tmp / 'work/README').write_text('x'); git('add', '-A'); git('commit', '-qm', 'main')
             git('remote', 'add', 'origin', (tmp / 'origin.git').as_uri()); git('push', '-q', 'origin', 'main')
             run = lambda script: subprocess.run(['bash', '-e', '-c', script], cwd=tmp / 'work', capture_output=True, text=True, env=env)
-            # 1. no data branch yet: an orphan worktree; the first capture creates the branch
+            # 1. no data branch yet (ls-remote exit 2): an orphan worktree; the first capture creates the branch
             proc = run(checkout); self.assertEqual(proc.returncode, 0, proc.stderr)
             (tmp / 'work/data-branch/snapshots').mkdir(); (tmp / 'work/data-branch/snapshots/d1').write_text('1')
             proc = run(commit); self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -82,6 +82,17 @@ class DailyCaptureWorkflowTests(unittest.TestCase):
             proc = run2(checkout); self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertEqual((tmp / 'work2/data-branch/snapshots/d1').read_text(), '1')
             proc = run2(commit); self.assertEqual(proc.returncode, 0, proc.stderr); self.assertIn('nothing to commit', proc.stdout)
+            # 2b. the branch exists but every fetch fails: the step fails after three tries, with no orphan worktree, and nothing is pushed
+            (tmp / 'bin').mkdir(); (tmp / 'bin/git').write_text(f'#!/bin/bash\nif [ "$1" = fetch ]; then echo x >> {tmp}/fetches; echo "fatal: simulated network failure" >&2; exit 128; fi\nexec {shutil.which("git")} "$@"\n')
+            (tmp / 'bin/sleep').write_text('#!/bin/sh\n'); (tmp / 'bin/git').chmod(0o755); (tmp / 'bin/sleep').chmod(0o755)
+            subprocess.run(['git', 'clone', '-q', '--depth=1', (tmp / 'origin.git').as_uri(), str(tmp / 'work3')], check=True, env=env)
+            tip = git('rev-parse', 'data', cwd=tmp / 'origin.git')
+            run3 = lambda script: subprocess.run(['bash', '-e', '-c', script], cwd=tmp / 'work3', capture_output=True, text=True, env={**env, 'PATH': f'{tmp}/bin:{env["PATH"]}'})
+            proc = run3(checkout); self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr); self.assertIn('not starting an empty one', proc.stderr)
+            self.assertEqual((tmp / 'fetches').read_text().count('x'), 3)
+            self.assertFalse((tmp / 'work3/data-branch').exists()); self.assertEqual(git('branch', '--list', 'data', cwd=tmp / 'work3'), '')
+            proc = run3(commit); self.assertNotEqual(proc.returncode, 0)  # the commit step runs on always(): it has no worktree to push
+            self.assertEqual(git('rev-parse', 'data', cwd=tmp / 'origin.git'), tip)
             # 3. a concurrent push lands between checkout and commit (the backfill's history): today's commit is replayed on top
             (tmp / 'work/data-branch/history').mkdir(); (tmp / 'work/data-branch/history/aa.json').write_text('{}')
             git('add', '-A', cwd=tmp / 'work/data-branch'); git('commit', '-qm', 'backfill', cwd=tmp / 'work/data-branch'); git('push', '-q', 'origin', 'HEAD:refs/heads/data', cwd=tmp / 'work/data-branch')

@@ -37,11 +37,17 @@ jobs:
         run: python3 -m unittest discover -s tests
       - name: Check out the data branch, or start it
         run: |
-          if git fetch --no-tags --depth=1 origin data; then
-            git worktree add --detach data-branch FETCH_HEAD
-          else
-            git worktree add --orphan -b data data-branch
-          fi
+          for attempt in 1 2 3; do
+            if git fetch --no-tags --depth=1 origin data; then
+              git worktree add --detach data-branch FETCH_HEAD; exit 0
+            fi
+            # Only a branch the remote says is missing (ls-remote exit 2) starts an orphan; a failed fetch of an existing one must not.
+            status=0; git ls-remote --exit-code --heads origin data > /dev/null || status=$?
+            if [ "$status" = 2 ]; then git worktree add --orphan -b data data-branch; exit 0; fi
+            sleep $((attempt * 15))
+          done
+          echo "the data branch exists (or the remote is unreachable) but could not be fetched three times: not starting an empty one" >&2
+          exit 1
       - name: Capture today's star counts
         id: capture
         env:
