@@ -128,10 +128,14 @@ class CohortTests(unittest.TestCase):
         diagnostic = json.loads((self.data.root / 'diagnostics/2026/2026-03-11.json').read_text())
         problems, _ = st.gate(st.validate_windows(page), diagnostic, self.world.now + dt.timedelta(hours=1))
         self.assertTrue(any('gain_90d is null' in p for p in problems), problems)
-        # and the next capture repairs them first, without queueing them as pending
+        # the next captures repair them in their own lane, never as pending: at most half the day's reads while entrants wait
         code, diag = self.run_day(3, 999, max_history=30)
-        self.assertEqual(diag['history']['repair'], len([i for i in lost if self.world.stars(i, self.world.now) > 999]))
-        self.assertTrue(set(lost) <= set(self.data.read_history_all())); self.assertFalse(set(lost) & set(self.data.read_pending()))
+        eligible = [i for i in lost if self.world.stars(i, self.world.now) > 999]
+        self.assertEqual(diag['history']['repair_queue'], len(eligible)); self.assertEqual(diag['history']['repair'], 15)
+        self.assertEqual(diag['history']['read'], 30)  # 15 repairs + 15 pending entrants
+        self.assertFalse(set(lost) & set(self.data.read_pending()))
+        code, diag = self.run_day(4, 999, max_history=30)
+        self.assertTrue(set(eligible) <= set(self.data.read_history_all())); self.assertEqual(self.data.read_repair(), {})
 
     def test_the_queue_is_durable_and_fair_a_failing_repo_goes_behind_the_others(self):
         self.run_day(0, 999, max_history=0)

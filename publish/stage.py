@@ -1,10 +1,11 @@
 """Stage the site from the data branch's `windows/latest.json`, or refuse.
 
 The gate fails closed (the run goes red, nothing is deployed, the current page stays) when the file is older than MAX_AGE_HOURS,
-when `row_count` is under COVERAGE_FLOOR of the search total in that day's diagnostic, when that diagnostic says a count batch
-stayed unread (known or new repositories), or when any gain column is null for more than NULL_CEILING of the rows whose history
+when `row_count` is under COVERAGE_FLOOR of the search total in that day's diagnostic, when that diagnostic is not the capture
+the file was built from (its captured_at, or any input's generation, differs from generated_at), when the capture was not
+complete (discovery did not list every slice, no search total that day, or a count batch stayed unread), or when any gain column is null for more than NULL_CEILING of the rows whose history
 is not pending, unless a missed capture explains it (missed_capture_columns). Pending history is the queued entrants whose
-history is not read yet (`history_pending` 1, capture/windows.py); a repo whose history record went missing is never pending.
+history is not complete yet (`history_pending` 1 or 2, capture/windows.py); a repo whose record went missing is never pending.
 The staged site is the checkout's UI sources (hashed by scripts/build_static_release.py) plus the
 page file (the columnar interface without the node IDs) and the agent feed under api/v2, plus the previous publication's hashed
 script, stylesheet and data files (one generation) so a page loaded before the deploy still finds them. Nothing is committed to git.
@@ -59,10 +60,8 @@ def validate_windows(doc):
         raise ValueError('threshold must be an integer')
     if 'history_pending' in (doc.get('columns') or {}):
         pending = doc['columns']['history_pending']
-        if not isinstance(pending, list) or len(pending) != count or any(value not in (0, 1) or type(value) is not int for value in pending):
-            raise ValueError(f'column history_pending must hold row_count ({count}) values of 0 or 1')
-        if any(flag and mask for flag, mask in zip(pending, doc['columns'].get('history_mask') or [])):
-            raise ValueError('a row with pending history cannot carry a history-sourced gain')
+        if not isinstance(pending, list) or len(pending) != count or any(value not in (0, 1, 2) or type(value) is not int for value in pending):
+            raise ValueError(f'column history_pending must hold row_count ({count}) values of 0, 1 or 2')
     columns = doc.get('columns')
     if not isinstance(columns, dict):
         raise ValueError('columns must be an object')
@@ -95,6 +94,20 @@ def pending_column(doc):
     return doc['columns'].get('history_pending') or [0] * doc['row_count']
 
 
+def capture_health(diagnostic):
+    """(complete, reasons) of the capture: its `completeness`, or for an older diagnostic, discovery complete with that day's
+    search total."""
+    completeness = diagnostic.get('completeness')
+    if isinstance(completeness, dict):
+        return completeness.get('status') == 'complete', list(completeness.get('reasons') or ([] if completeness.get('status') == 'complete' else ['status not complete']))
+    reasons = []
+    if (diagnostic.get('discovery') or {}).get('status') != 'complete':
+        reasons.append(f'discovery {(diagnostic.get("discovery") or {}).get("status")}')
+    if (diagnostic.get('coverage') or {}).get('total_count_source') != 'search':
+        reasons.append('no search total that day')
+    return not reasons, reasons
+
+
 def count_health(diagnostic):
     """(known unread, new unread) from the capture diagnostic: its `counts` block, or the failed queries of an older diagnostic."""
     counts = diagnostic.get('counts') if isinstance(diagnostic, dict) else None
@@ -113,7 +126,7 @@ def gate(doc, diagnostic, now):
     age_hours = (now - generated).total_seconds() / 3600
     measurements = {'generated_at': doc['generated_at'], 'age_hours': round(age_hours, 2), 'max_age_hours': MAX_AGE_HOURS, 'row_count': doc['row_count'],
                     'search_total': None, 'coverage': None, 'coverage_floor': COVERAGE_FLOOR, 'null_share': {}, 'null_share_not_pending': {}, 'null_ceiling': NULL_CEILING,
-                    'null_exempt': missed_capture_columns(doc), 'pending_rows': 0, 'unread': None, 'capture': doc.get('capture')}
+                    'null_exempt': missed_capture_columns(doc), 'pending_rows': 0, 'unread': None, 'capture': doc.get('capture'), 'generation': doc.get('generation')}
     if age_hours > MAX_AGE_HOURS:
         problems.append(f'windows file is {age_hours:.1f} h old (generated {doc["generated_at"]}), over {MAX_AGE_HOURS} h')
     total = None
@@ -121,18 +134,27 @@ def gate(doc, diagnostic, now):
         total = diagnostic['coverage'].get('total_count')
     if type(total) is not int or total <= 0:
         problems.append(f'no search total in the capture diagnostic for {doc["date"]}')
+        measurements['generation'] = doc.get('generation')
     else:
         measurements['search_total'] = total
         measurements['coverage'] = round(doc['row_count'] / total, 4)
         if doc['row_count'] < COVERAGE_FLOOR * total:
             problems.append(f'row_count {doc["row_count"]} is under {COVERAGE_FLOOR:.0%} of the search total {total}')
+        if diagnostic.get('captured_at') != doc['generated_at']:
+            problems.append(f'the diagnostic is from capture {diagnostic.get("captured_at")}, the file from {doc["generated_at"]}: an interrupted run')
+        stale = sorted(name for name, stamp in (doc.get('generation') or {}).items() if stamp is not None and stamp != doc['generated_at'])
+        if stale:
+            problems.append(f'inputs from another capture than {doc["generated_at"]}: {", ".join(stale)}')
+        complete, reasons = capture_health(diagnostic)
+        if not complete:
+            problems.append(f'the capture was partial: {"; ".join(reasons)}')
         known_unread, new_unread = count_health(diagnostic)
         measurements['unread'] = {'known': known_unread, 'new': new_unread}
         if known_unread or new_unread:
             problems.append(f'the capture left {known_unread} known and {new_unread} new repositories unread (failed count batches)')
     pending = pending_column(doc)
-    measurements['pending_rows'] = sum(pending)
-    settled = doc['row_count'] - sum(pending)
+    measurements['pending_rows'] = sum(1 for flag in pending if flag)
+    settled = doc['row_count'] - measurements['pending_rows']
     for name in GAIN_COLUMNS:
         values = doc['columns'][name]
         nulls = sum(1 for value in values if value is None)
@@ -161,7 +183,7 @@ def page_file(doc):
     columns['history_pending'] = pending_column(doc)
     return {'schema': PAGE_FILE_SCHEMA, 'generated_at': doc['generated_at'], 'date': doc['date'], 'threshold': doc['threshold'], 'min_stars': doc['threshold'] + 1,
             'row_count': doc['row_count'], 'first_snapshot_date': doc.get('first_snapshot_date'), 'windows': doc['windows'],
-            'history': {'pending_rows': sum(columns['history_pending']), **{k: v for k, v in (doc.get('history') or {}).items() if k != 'pending_rows'}},
+            'history': {'pending_rows': sum(1 for v in columns['history_pending'] if v), **{k: v for k, v in (doc.get('history') or {}).items() if k != 'pending_rows'}},
             'capture': doc.get('capture'), 'columns': columns}
 
 

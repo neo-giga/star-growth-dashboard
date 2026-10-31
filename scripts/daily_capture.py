@@ -6,16 +6,16 @@ repos.json, the history queue, the windows file and the diagnostic. The threshol
 repo with at least 1,000 stars. A same-day rerun keeps the earlier run's counts for the repos it could not read.
 The day's counts live in the snapshot only: repos.json carries no per-day field, so it only changes when a repo enters, is renamed or changes language (measured 2026-10-29: a daily `stars` + `last_seen` cost
 4.6 MiB of pack in 14 days, ~120 MiB a year, for data the snapshot already holds). Exit codes:
-0 fine; 3 the files are written but coverage (repos read with stars above the threshold / search total_count) is under
-COVERAGE_FLOOR or a count batch stayed unread after its retries, so the run should go red after committing; 2 nothing usable
-was written.
+0 a complete capture; 3 the files are written but the capture is partial (discovery not complete, no search total today, a
+count batch unread after its retry, or coverage under COVERAGE_FLOOR), so the run should go red after committing and the
+publisher keeps the previous page; 2 nothing usable was written.
 """
 from __future__ import annotations
-import argparse, datetime as dt, json, pathlib, shutil, sys, tempfile, time
+import argparse, datetime as dt, itertools, json, pathlib, shutil, sys, tempfile, time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from capture.discovery import WORKERS as DISCOVERY_WORKERS, discover, total_count
 from capture.github import GitHub, GitHubError, token_from_environment
-from capture.history import anchored_reads, fold, pacific_date, read_pages
+from capture.history import anchored_reads, fold, pacific_date, read_pages, record_complete
 from capture.snapshot import read_counts
 from capture.store import DataDir
 from capture.windows import build_page
@@ -25,7 +25,7 @@ COVERAGE_FLOOR = 0.99
 # (scripts/backfill_history.py) reads the bulk, this covers the day's entrants and any leftovers.
 MAX_HISTORY_PER_DAY = 400
 CORE_PER_HOUR = 900  # the client's sliding-hour core budget: under GITHUB_TOKEN's 1,000, retries included
-HISTORY_DEADLINE_MINUTES = 110  # no history batch starts after this (from the run's start), inside the job's timeout
+HISTORY_DEADLINE_MINUTES = 110  # no history request starts after this (from the run's start): 40 of the job's 150 min stay for writing and committing
 
 
 def utcnow():
@@ -48,9 +48,10 @@ def read_counts_twice(gh, ids, workers):
 
 
 def history_turn(entry, node_id):
-    """Queue order: the date the repo last had a turn (its entry date until its first attempt), then entry date, then ID. A repo
-    whose read failed goes behind every repo that has waited longer, so neither new arrivals nor failing IDs starve the rest."""
-    return (entry.get('last_attempt') or entry['since'], entry['since'], node_id)
+    """Queue order: the date the repo last had a turn (its entry date until its first attempt), then fewer attempts, then entry
+    date, then ID. A repo whose read failed goes behind every repo that has waited longer (and behind one never tried on the same
+    day), so neither new arrivals nor failing IDs starve the rest."""
+    return (entry.get('last_attempt') or entry['since'], entry.get('attempts', 0), entry['since'], node_id)
 
 
 def completeness(threshold, counts, discovery, total, total_source, known_unread, entrants_unread, inaccessible):
@@ -141,60 +142,76 @@ def run(gh, data, threshold, now=None, workers=4, deadline_minutes=60, skip_disc
         diagnostic['new_entrants']['count'] = len(entrants)
         if counts:
             data.write_snapshot(date, now.isoformat(), counts, threshold)
-    # 4. history for eligible repos that have none, at most max_history a day, inside the core budget and the history deadline.
-    # Today's entrants join the durable queue (history-pending.json); its rows are shown as pending, not hidden and not zero.
-    # A repo that lacks history but is not queued (its record went missing) is read first and never counts as pending.
+    # 4. history for eligible repos without a complete record (capture.history.record_complete), at most max_history a day, inside
+    # the core budget and the history deadline. Today's entrants join the durable pending queue (history-pending.json); its rows
+    # are shown as pending, not hidden and not zero. A known repo whose record is missing or incomplete goes to the repair queue
+    # instead: read in turn like the pending ones but never pending, and given at most half the day's reads while entrants wait.
     history = data.read_history_all()
-    queue = data.read_pending()
+    queue, repair = data.read_pending(), data.read_repair()
     for node_id in entrants:
-        if node_id not in history:
+        if not record_complete(history.get(node_id)):
             queue.setdefault(node_id, {'since': date.isoformat()})
-    for node_id in [i for i in queue if i in history]:  # read by another path (a backfill): no longer pending
-        del queue[node_id]
-    lacking = [i for i, stars in counts.items() if stars > threshold and i not in history]
-    repair = sorted(i for i in lacking if i not in queue)
-    picked = (repair + sorted((i for i in lacking if i in queue), key=lambda i: history_turn(queue[i], i)))[:max_history]
+    for waiting_list in (queue, repair):
+        for node_id in [i for i in waiting_list if record_complete(history.get(i))]:  # completed by another path (a backfill)
+            del waiting_list[node_id]
+    lacking = [i for i, stars in counts.items() if stars > threshold and not record_complete(history.get(i))]
+    for node_id in lacking:
+        if node_id not in queue:
+            repair.setdefault(node_id, {'since': date.isoformat()})
+    waiting = sorted((i for i in lacking if i in queue), key=lambda i: history_turn(queue[i], i))
+    fixing = sorted((i for i in lacking if i in repair), key=lambda i: history_turn(repair[i], i))
+    fixing = fixing[:max(max_history // 2, max_history - len(waiting))]
+    waiting = waiting[:max_history - len(fixing)]
+    picked = [i for pair in itertools.zip_longest(fixing, waiting) for i in pair if i is not None]  # a deadline cuts both lanes alike
     diagnostic['new_entrants']['history_pending'] = len(lacking)
-    report = {'queue': len(queue), 'eligible_without_history': len(lacking), 'repair': len(repair), 'selected': len(picked), 'read': 0, 'failed': 0,
-              'unread': 0, 'deferred': 0, 'core_per_hour': gh.core_per_hour}
+    report = {'queue': len(queue), 'repair_queue': len(repair), 'eligible_without_history': len(lacking), 'repair': len(fixing), 'selected': len(picked),
+              'read': 0, 'incomplete': 0, 'failed': 0, 'unread': 0, 'deferred': 0, 'core_per_hour': gh.core_per_hour}
     if picked:
         anchor_stats, records = {}, {}
         stop_at = gh.clock() + max(history_deadline_minutes * 60 - (time.monotonic() - started), 0)
-        gh.deadline = stop_at  # retry and budget waits stop there too: the job's timeout must never cut the commit
+        gh.deadline = stop_at  # every request, retry and budget wait stops there: the job's timeout must never cut the commit
+        done = 0
         try:
             for start in range(0, len(picked), 100):  # the anchor is the count seconds before the history read, per batch of 100
-                if gh.clock() >= stop_at:
-                    report['deferred'] = len(picked) - start
-                    break
                 for node_id, status, anchor_at, anchor, result in anchored_reads(gh, picked[start:start + 100], lambda name: read_pages(gh, name, pages=2), wall,
                                                                                  requests_per_repo=2, stats=anchor_stats):
-                    if node_id in queue:
-                        entry = queue[node_id]
-                        entry.update(attempts=entry.get('attempts', 0) + 1, last_attempt=date.isoformat(),
-                                     last_status=status if status != 'error' else f'error {getattr(result, "status", "")}'.strip())
+                    done += 1
+                    entry = queue.get(node_id) or repair.get(node_id)
                     if status == 'ok':
                         weeks = [w for _, page_weeks, _ in result for w in page_weeks]
-                        records[node_id] = fold(weeks, anchor_at, anchor['stars'], pages=len(result), has_more=result[-1][2])
-                        queue.pop(node_id, None)
-                        diagnostic['new_entrants']['history_read'] += 1
-                        report['read'] += 1
+                        record = fold(weeks, anchor_at, anchor['stars'], pages=len(result), has_more=result[-1][2])
+                        old = history.get(node_id)
+                        if record_complete(record) or old is None or (record['start'] and (old.get('start') is None or record['start'] <= old['start'])):
+                            records[node_id] = record  # keep the partial work unless an earlier record reaches further back
+                        if record_complete(record):
+                            queue.pop(node_id, None); repair.pop(node_id, None)
+                            diagnostic['new_entrants']['history_read'] += 1
+                            report['read'] += 1
+                            continue
+                        report['incomplete'] += 1
+                        status = 'incomplete'
                     elif status == 'error':
                         diagnostic['new_entrants']['history_failed'] += 1
                         report['failed'] += 1
                     else:
                         report['unread'] += 1
-        except GitHubError as error:  # the deadline inside a budget wait: the rest waits for tomorrow
-            report['deferred'] = len(picked) - report['read'] - report['failed'] - report['unread']
+                    entry.update(attempts=entry.get('attempts', 0) + 1, last_attempt=date.isoformat(),
+                                 last_status=status if status != 'error' else f'error {getattr(result, "status", "")}'.strip())
+        except GitHubError as error:  # the history deadline (before a request, a repo or a budget wait): the rest waits for tomorrow
             report['stopped'] = repr(error)[:200]
         finally:
             gh.deadline = None
+        report['deferred'] = len(picked) - done
         diagnostic['snapshot']['points'] += anchor_stats.get('anchor_points', 0)
         if records:
             data.write_history(records)
             history.update(records)
-    report['pending_after'] = sum(1 for i in counts if counts[i] > threshold and i in queue and i not in history)
+    retrying = {name: {i: e for i, e in lane.items() if e.get('attempts')} for name, lane in (('pending', queue), ('repair', repair))}
+    report.update(pending_after=sum(1 for i in counts if counts[i] > threshold and i in queue), repair_after=sum(1 for i in counts if counts[i] > threshold and i in repair),
+                  pending_retrying=len(retrying['pending']), repair_retrying=len(retrying['repair']),
+                  retrying_sample={name: dict(sorted(lane.items(), key=lambda kv: -kv[1]['attempts'])[:20]) for name, lane in retrying.items()})
     diagnostic['history'] = report
-    data.write_pending(queue, now.isoformat())
+    data.write_pending(queue, now.isoformat(), repair)
     # 5. the known set, the meta, the windows, the diagnostic
     repos_doc.update({'threshold': threshold, 'updated_at': now.isoformat(), 'repos': dict(sorted(known.items()))})
     data.write_repos(repos_doc)
@@ -202,7 +219,8 @@ def run(gh, data, threshold, now=None, workers=4, deadline_minutes=60, skip_disc
     first_snapshot = min(dt.date.fromisoformat(first), date) if first else (date if counts else None)
     if total is not None and total_source == 'search':
         meta.update({'last_total_count': total, 'last_total_count_at': now.isoformat(), 'last_total_count_source': total_source, 'last_total_count_threshold': threshold})
-    meta.update({'first_snapshot_date': first_snapshot.isoformat() if first_snapshot else None, 'last_capture_date': date.isoformat() if counts else meta.get('last_capture_date')})
+    meta.update({'first_snapshot_date': first_snapshot.isoformat() if first_snapshot else None, 'last_capture_date': date.isoformat() if counts else meta.get('last_capture_date'),
+                 'last_capture_at': now.isoformat() if counts else meta.get('last_capture_at')})
     data.write_meta(meta)
     status = completeness(threshold, counts, diagnostic['discovery'].get('status'), total, total_source, len(known_unread), len(entrants_unread),
                           len(inaccessible) + len(entrants_inaccessible))
@@ -212,14 +230,18 @@ def run(gh, data, threshold, now=None, workers=4, deadline_minutes=60, skip_disc
                             'entrants_unread': len(entrants_unread), 'entrants_unread_ids': entrants_unread[:100], 'entrants_inaccessible': len(entrants_inaccessible)}
     page = None
     if counts:
-        page = build_page(date, now.isoformat(), threshold, known, counts, data.snapshot_dates(), data.read_snapshot, history, first_snapshot, pending=queue, capture=status)
+        stamp = now.isoformat()  # one generation: the snapshot, repos.json, meta.json, the queue and the diagnostic all carry it
+        page = build_page(date, stamp, threshold, known, counts, data.snapshot_dates(), data.read_snapshot, history, first_snapshot, pending=queue, capture=status,
+                          repair=repair, generation={'snapshot': stamp, 'repos': stamp, 'meta': stamp, 'queue': stamp, 'diagnostic': stamp})
         data.write_windows(page)
         diagnostic['windows'] = {'rows': page['row_count'], 'history_records': len(history), 'per_window': page['windows']}
     above = sum(1 for stars in counts.values() if stars > threshold)
     ratio = (above / total) if total else None
     diagnostic['coverage'] = {'rows_above_threshold': above, 'total_count': total, 'total_count_source': total_source, 'ratio': round(ratio, 4) if ratio is not None else None,
                               'floor': COVERAGE_FLOOR, 'ok': ratio is not None and ratio >= COVERAGE_FLOOR}
-    diagnostic['exit_code'] = 2 if not counts else (0 if diagnostic['coverage']['ok'] and not known_unread and not entrants_unread else 3)
+    # Green only for a complete capture: every discovery slice listed, today's search total, nothing unread, coverage at the floor.
+    # A partial capture is still written and committed (a lost day is worse than a red run); the publisher keeps the previous page.
+    diagnostic['exit_code'] = 2 if not counts else (0 if status['status'] == 'complete' else 3)
     diagnostic['seconds'] = round(time.monotonic() - started, 1)
     data.write_diagnostic(date, diagnostic)
     log(f'coverage: {above} rows above {threshold} vs total_count {total} ({total_source}) -> {diagnostic["coverage"]["ok"]}; exit {diagnostic["exit_code"]}')
@@ -238,7 +260,7 @@ def main(argv=None):
     parser.add_argument('--max-slices', type=int, help='list at most this many discovery slices (dry runs; the rest are skipped)')
     parser.add_argument('--max-history', type=int, default=MAX_HISTORY_PER_DAY, help=f'read history for at most this many repos that lack it (default {MAX_HISTORY_PER_DAY})')
     parser.add_argument('--core-per-hour', type=int, default=CORE_PER_HOUR, help=f'sliding-hour core request budget (default {CORE_PER_HOUR})')
-    parser.add_argument('--history-deadline-minutes', type=float, default=HISTORY_DEADLINE_MINUTES, help=f'no history batch starts after this (default {HISTORY_DEADLINE_MINUTES})')
+    parser.add_argument('--history-deadline-minutes', type=float, default=HISTORY_DEADLINE_MINUTES, help=f'no history request starts this long after the run started (default {HISTORY_DEADLINE_MINUTES})')
     parser.add_argument('--diagnostic', help='also write the diagnostic JSON here')
     parser.add_argument('--request-log', help='append one JSON line per HTTP request here (timestamp, URL, status, rate-limit remaining)')
     parser.add_argument('--dry-run', action='store_true', help='write into a fresh temporary directory, printed at the end, instead of --data-dir')

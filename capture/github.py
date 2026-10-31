@@ -131,6 +131,8 @@ class GitHub:
         if body is not None:
             headers['Content-Type'] = 'application/json'
         for attempt in range(1, attempts + 1):
+            if self.deadline is not None and self.clock() >= self.deadline:  # never start a request after the deadline
+                raise GitHubError('deadline', 'the deadline has passed', url)
             if resource == 'search':
                 self._pace_search(url)
             elif resource == 'core':
@@ -195,15 +197,16 @@ class GitHub:
         data, _ = self.rest('/search/repositories', {'q': query, 'per_page': per_page, 'page': page, 'sort': sort, 'order': order}, resource='search', attempts=attempts)
         return data
 
-    def graphql(self, query, variables=None):
-        """POST a GraphQL query; returns data. Partial data with errors is returned (nodes() reports missing IDs that way)."""
+    def graphql(self, query, variables=None, with_errors=False):
+        """POST a GraphQL query; returns data, or (data, errors) with with_errors. Partial data with errors is returned: the caller
+        decides per path what an error means (nodes() answers an unresolvable ID with null plus a NOT_FOUND error at its path)."""
         body = json.dumps({'query': query, 'variables': variables or {}}).encode()
         for attempt in range(1, self.max_attempts + 1):
             _, _, raw = self._request('POST', API + '/graphql', body, resource='graphql')
             answer = json.loads(raw)
-            if answer.get('data'):
-                return answer['data']
             errors = answer.get('errors') or []
+            if answer.get('data'):
+                return (answer['data'], errors) if with_errors else answer['data']
             if any(e.get('type') == 'RATE_LIMITED' for e in errors) and attempt < self.max_attempts:
                 with self.lock:
                     self.counts['retries'] += 1

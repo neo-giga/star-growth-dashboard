@@ -137,8 +137,10 @@ class DailyCaptureTests(unittest.TestCase):
         self.run_day(0)
         self.world.search_down = True
         code, diag = self.run_day(1)
-        self.assertEqual(code, 0); self.assertEqual(diag['discovery']['status'], 'failed')
+        # red (a partial capture never passes as complete), yet the day's files are all written for the commit
+        self.assertEqual(code, 3); self.assertEqual(diag['discovery']['status'], 'failed')
         self.assertEqual(diag['coverage']['total_count_source'], 'previous'); self.assertTrue(diag['coverage']['ok'])
+        self.assertEqual(diag['completeness']['reasons'], ['discovery failed', 'search total from an earlier capture'])
         self.assertTrue(self.data.snapshot_path(dt.date(2026, 3, 10)).exists())
         page = json.loads((self.data.root / 'windows/latest.json').read_text()); self.assertEqual(page['date'], '2026-03-10')
         self.assertEqual(page['windows'][0]['source'], 'snapshot')
@@ -154,7 +156,7 @@ class DailyCaptureTests(unittest.TestCase):
         self.world.max_per_page = 30; self.world.flaky['per_page=30&page=2&'] = 10 ** 6
         code, diag = self.run_day(3)
         self.assertEqual(diag['discovery']['status'], 'partial'); self.assertGreater(diag['discovery']['slices_failed'], 0)
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 3); self.assertEqual(diag['completeness']['reasons'], ['discovery partial'])
 
     def test_no_total_count_at_all_goes_red_but_still_writes_everything(self):
         self.run_day(0)

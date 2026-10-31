@@ -1,11 +1,25 @@
 # Star growth dashboard
 
-**Find the projects that are accelerating across the whole tracked set of public GitHub repositories, not only inspect a
-project you already know.** Every public repository with at least 1,000 stars, forks included, sits in one table with the
-stars it gained over the past 1, 7, 15, 30, 90, 180 and 365 days: sort by any window to see what is taking off this week
-or this year, search by name, filter by language. Live at **https://neo-giga.github.io/star-growth-dashboard/**; agents
-start at the catalog, [`api/v2/catalog.json`](https://neo-giga.github.io/star-growth-dashboard/api/v2/catalog.json), or
-[`llms.txt`](llms.txt) (contract: [docs/agent-feed.md](docs/agent-feed.md)).
+**A daily, machine-readable GitHub repository discovery dataset for agents to find accelerating projects across the full
+tracked set.** Its primary users are agents in any harness (Claude Code, Muse, Grok bots, or anything that can make an HTTPS
+request): every public repository over the star minimum (the catalog's `min_stars`), forks included, with its star count and
+the stars it gained over the past 1, 7, 15, 30, 90, 180 and 365 days, as static files any agent can fetch and filter itself.
+
+- **Start here:** [`api/v2/catalog.json`](https://neo-giga.github.io/star-growth-dashboard/api/v2/catalog.json), the
+  current pointer: capture date and time, row count, `min_stars`, the seven windows with their sources, the capture's
+  completeness (`capture`), the pending-history count (`history`), and links to the files below.
+- **Portable files over HTTPS:** the full set as JSONL and CSV, the columnar JSON the page itself uses, top-100 JSON and
+  Markdown per window, a JSON Schema for records, and a manifest with every file's size and SHA-256. All are static and
+  content-addressed per capture. No key, no login, no query API.
+- **Provenance in every answer:** each gain says whether it is exact (`snapshot`) or approximate (`history`); recently
+  added repositories carry `history_pending`; the catalog says whether the day's capture was complete and why not.
+- **Contract:** [docs/agent-feed.md](docs/agent-feed.md), plus [`llms.txt`](llms.txt) as a short index.
+- **Not live yet:** topic or task queries ("top repositories for vector search this month") are a planned follow-on and
+  are not implemented here. The feed has no topics or descriptions yet, only names, languages, creation dates, stars and
+  gains; an agent can rank and filter by those today.
+
+The webpage, **https://neo-giga.github.io/star-growth-dashboard/**, is a secondary human explorer over the same rows: one
+table sortable by any window, name search, language filter.
 
 ## Why it exists and when to use it
 
@@ -19,8 +33,8 @@ start at the catalog, [`api/v2/catalog.json`](https://neo-giga.github.io/star-gr
   says whether it came from snapshots (exact) or from GitHub's star history (approximate), and repositories whose history
   is not read yet are marked pending instead of hidden or zeroed.
 
-Use it to scout what is gaining momentum in a period, to scan a language for fast risers, or to pull a dated cohort for an
-analysis. Use a per-repository tool when you already know which projects you care about.
+Use it when an agent (or a person) needs to scout what is gaining momentum in a period, scan a language for fast risers,
+or pull a dated cohort for an analysis. Use a per-repository tool when you already know which projects you care about.
 
 ## How this differs from existing solutions
 
@@ -42,6 +56,10 @@ Star History to see its curve). This project does not draw charts and does not p
   capture time. The search index moves during a capture, so a row count close to the search total is reported as such,
   not as a census.
 - **Not real time**: one capture a day (05:30 UTC, often started late by GitHub's queue); the page shows its capture time.
+- **A partial day is not published**: when GitHub search is degraded and discovery cannot list every slice, when there is no
+  search total that day, or when a count read fails, the capture is still saved on the `data` branch but its run goes red
+  and the previous day's files stay live. On such days the page and feed do not update; the catalog's `date` says which
+  capture is served.
 - **Approximate until exact baselines exist**: a window's gains come from GitHub's star history (marked ≈; stars given and
   later removed are not counted) until a daily snapshot N days old exists for that repository.
 - **Pending history**: repositories that joined recently show their current stars and metadata at once; gains no snapshot
@@ -51,8 +69,8 @@ Star History to see its curve). This project does not draw charts and does not p
 ## What is live, and what is new
 
 The live page was built for the set above 2,000 stars (34,231 rows at the 2026-10-31 capture, every gain measured). The
-`>= 1,000` set (66,915 repositories in GitHub search on 2026-10-31) takes over from the first capture published after this
-change ships; its ~32,700 new rows start with pending history, read gradually by the daily capture. The live catalog's
+`>= 1,000` set (66,915 repositories in GitHub search on 2026-10-31) takes over from the first complete capture published
+after this change ships (more than one day if search is degraded: see *Limits*); its ~32,700 new rows start with pending history, read gradually by the daily capture. The live catalog's
 `min_stars`, `capture` and `history` fields say which set is served and how far its history has come.
 
 - **The page** (`index.html`, `app.js`, `style.css`): one table with a column per window, sortable by any column
@@ -109,11 +127,12 @@ publication follows whenever the capture completes.
 
 ### The publish gate
 
-`scripts/publish_page.py` (rules in `publish/stage.py`) refuses, and the current page stays, when the windows file is older
-than 36 hours, its row count is under 99% of that day's search total, the capture left a count batch unread (known or new
-repositories), or any gain column is null for more than 1% of the rows whose history is not pending. Pending means the
-repository entered the set without history and is queued in `history-pending.json`; a repository whose history record went
-missing is never pending, so its nulls still count.
+`scripts/publish_page.py` (rules in `publish/stage.py`) refuses, and the current page stays, when the capture was partial
+(discovery did not list every slice, no search total that day, or a count read stayed unread), when the windows file and the
+day's diagnostic come from different capture runs (an interrupted rerun), when the file is older than 36 hours, its row
+count is under 99% of that day's search total, or any gain column is null for more than 1% of the rows whose history is not
+pending. Pending means the repository entered the set without history and is queued in `history-pending.json`; a known
+repository whose history record went missing or is incomplete is in the repair queue, never pending, so its nulls still count.
 The one exception: when a missed capture leaves a window without its baseline snapshot on or after its `exact_since`, that
 day's column is exempt from the null rule and the page notes it. The workflow never passes `--ignore-gate`; it is for local
 previews only. A run also stops before deploying, red at *Refuse to deploy a stale run*, when live `main`'s UI or scripts no
@@ -186,9 +205,10 @@ When done with both, remove the `data` checkout: `git worktree remove "$out/data
   triggered.
 - **UI change merged but the page looks old**: only the push paths listed above trigger a publication. Changes to
   `README.md`, `tests/` or other docs trigger nothing.
-- **Capture run red** at *Fail the run when coverage is under the floor*: the day's files were still committed; the snapshot
-  covered under 99% of the search total, or a count batch stayed unread after its retries (`counts.known_unread` /
-  `entrants_unread` in the diagnostic). A rerun the same Pacific day reads them again and keeps the counts it already has. `capture-diagnostic-<run_id>` has the slices listed, failed and skipped. If it also
+- **Capture run red** at *Fail the run when coverage is under the floor*: the day's files were still committed, but the
+  capture was partial: `completeness.reasons` in the diagnostic says why (discovery partial or failed, typically degraded
+  search; no search total; a count read unread after its retry, `counts.known_unread` / `entrants_unread`; coverage under
+  99%). Its publication is refused and yesterday's page stays. A rerun the same Pacific day reads them again and keeps the counts it already has. `capture-diagnostic-<run_id>` has the slices listed, failed and skipped. If it also
   holds `unpushed-data-commit.patch`, the push to `data` lost a race three times or conflicted: apply the patch by hand.
 - **Checking the data branch**: `git fetch origin data && git log --oneline FETCH_HEAD` shows one `capture YYYY-MM-DD`
   commit per day.

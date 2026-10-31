@@ -6,6 +6,7 @@ const DATA_SCHEMA = 'star-growth-dashboard/page/1';
 const UNKNOWN = '—';
 const PENDING = 'pending';
 const PENDING_TITLE = 'History pending: this repository joined recently and its GitHub star history is read gradually, oldest first. Its stars are current; this gain appears once its history or enough daily snapshots exist.';
+const RETRYING_TITLE = 'History pending: a read of this repository\'s GitHub star history failed or came back incomplete; it is retried in turn. Its stars are current.';
 const DEFAULT_SORT = 'gain_7d';
 /* Sortable columns in table order: key, header label, kind (text columns sort ascending on the first click, numbers descending). */
 const COLUMNS = [
@@ -62,14 +63,14 @@ function parseData(data) {
   const rows = new Array(count);
   for (let i = 0; i < count; i++) {
     const row = {full_name: columns.full_name[i], language: columns.language[i], created_at: columns.created_at[i], stars: columns.stars[i], history_mask: numeric(columns.history_mask[i]) || 0,
-      pending: Array.isArray(columns.history_pending) && columns.history_pending[i] === 1};
+      pending: Array.isArray(columns.history_pending) && (columns.history_pending[i] === 1 || columns.history_pending[i] === 2), retrying: Array.isArray(columns.history_pending) && columns.history_pending[i] === 2};
     for (const key of GAIN_COLUMNS) row[key] = columns[key][i];
     row.search = String(row.full_name || '').toLowerCase();
     rows[i] = row;
   }
-  const threshold = numeric(data.threshold), pending = rows.reduce((n, row) => n + (row.pending ? 1 : 0), 0);
+  const threshold = numeric(data.threshold), pending = rows.reduce((n, row) => n + (row.pending ? 1 : 0), 0), retrying = rows.reduce((n, row) => n + (row.retrying ? 1 : 0), 0);
   return {rows, windows, generated_at: data.generated_at, date: data.date, threshold, min_stars: numeric(data.min_stars) ?? (threshold === null ? null : threshold + 1), row_count: count,
-    pending, capture: data.capture && typeof data.capture === 'object' ? data.capture : null};
+    pending, retrying, capture: data.capture && typeof data.capture === 'object' ? data.capture : null};
 }
 /* One line on how complete the capture is and how much history is still pending; null when the file says nothing about either. */
 function captureNote(data) {
@@ -77,7 +78,7 @@ function captureNote(data) {
   if (capture && capture.status === 'complete') parts.push('Capture complete: every discovery slice listed and every count read');
   else if (capture && capture.status) parts.push(`Capture partial: ${Array.isArray(capture.reasons) && capture.reasons.length ? capture.reasons.join('; ') : 'see the capture diagnostic'}`);
   if (capture && numeric(capture.search_total) !== null) parts.push(`${displayNumber(capture.rows)} rows vs GitHub search total ${displayNumber(capture.search_total)}`);
-  if (data && data.pending) parts.push(`history pending for ${displayNumber(data.pending)} recently added repositories (read a few hundred a day; their unknown gains show "${PENDING}")`);
+  if (data && data.pending) parts.push(`history pending for ${displayNumber(data.pending)} recently added repositories (read a few hundred a day; their unknown gains show "${PENDING}")${data.retrying ? `, ${displayNumber(data.retrying)} of them retried after a failed read` : ''}`);
   return parts.length ? parts.join(' · ') + '.' : null;
 }
 function windowTooltip(window) {
@@ -243,6 +244,7 @@ if (typeof document !== 'undefined') {
     const offset = (page - 1) * PAGE_SIZE, body = el('rows'); body.replaceChildren();
     const total = rows.length.toLocaleString('en-US'), threshold = data.min_stars === null ? '' : ` with at least ${data.min_stars.toLocaleString('en-US')} stars`;
     el('result-count').textContent = sorted.length === rows.length ? `${total} repositories${threshold}` : `${sorted.length.toLocaleString('en-US')} of ${total} repositories${threshold}`;
+    if (data.min_stars !== null) { el('min-stars').textContent = data.min_stars.toLocaleString('en-US'); document.title = `Star Growth · Repositories with at least ${data.min_stars.toLocaleString('en-US')} stars`; }
     el('updated').textContent = timeLabel(data.generated_at) !== UNKNOWN ? `Updated ${timeLabel(data.generated_at).slice(0, 16)} UTC` : '';
     renderHeaders();
     const note = windowNote(windows.find(w => w.column === chosen), data.date);  /* cards have no header row to carry it */
@@ -267,7 +269,7 @@ if (typeof document !== 'undefined') {
       for (const [index, key] of GAIN_COLUMNS.entries()) {
         const value = numeric(row[key]), cell = node('td', value === null && row.pending ? PENDING : displayNumber(value, true), 'num gain');
         cell.dataset.label = COLUMNS.find(([k]) => k === key)[1];
-        if (value === null) { cell.classList.add('muted'); if (row.pending) { cell.classList.add('pending'); cell.title = PENDING_TITLE; } } else if (value > 0) cell.classList.add('gain-positive');
+        if (value === null) { cell.classList.add('muted'); if (row.pending) { cell.classList.add('pending'); cell.title = row.retrying ? RETRYING_TITLE : PENDING_TITLE; } } else if (value > 0) cell.classList.add('gain-positive');
         if (value !== null && (row.history_mask & (1 << index))) { cell.classList.add('approx'); cell.title = windowTooltip(windows[index]); }
         if (key === chosen) cell.classList.add('chosen');
         tr.append(cell);

@@ -31,7 +31,8 @@ def data_branch(root, captured_at, total=200, drop_90d=0, missed=()):
             counts = dict(list(counts.items())[drop_90d:])
         data.write_snapshot(date - dt.timedelta(days=days), (captured_at - dt.timedelta(days=days)).isoformat(), counts, 2000)
     data.write_meta({'first_snapshot_date': (date - dt.timedelta(days=365)).isoformat(), 'last_total_count': total, 'last_capture_date': date.isoformat()})
-    data.write_diagnostic(date, {'date': date.isoformat(), 'coverage': {'total_count': total, 'total_count_source': 'search'}})
+    data.write_diagnostic(date, {'date': date.isoformat(), 'captured_at': captured_at.isoformat(), 'discovery': {'status': 'complete'},
+                                 'coverage': {'total_count': total, 'total_count_source': 'search'}})
 
 
 class PublishWorkflowTests(unittest.TestCase):

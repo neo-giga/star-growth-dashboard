@@ -21,10 +21,16 @@ def build(data):
     snapshot = json.loads(data.snapshot_path(date).read_bytes())
     counts = dict(zip(snapshot['node_id'], snapshot['stars']))
     first = dt.date.fromisoformat(meta['first_snapshot_date']) if meta.get('first_snapshot_date') else None
-    diagnostic = data.root / 'diagnostics' / date.isoformat()[:4] / f'{date.isoformat()}.json'
-    capture = json.loads(diagnostic.read_bytes()).get('completeness') if diagnostic.is_file() else None
-    page = build_page(date, snapshot['captured_at'], snapshot['threshold'], data.read_repos()['repos'], counts, data.snapshot_dates(), data.read_snapshot,
-                      data.read_history_all(), first, pending=data.read_pending(), capture=capture)
+    path = data.root / 'diagnostics' / date.isoformat()[:4] / f'{date.isoformat()}.json'
+    diagnostic = json.loads(path.read_bytes()) if path.is_file() else {}
+    repos = data.read_repos()
+    # Each input's capture instant: a run that rewrote the snapshot and stopped before its diagnostic leaves them unequal, and
+    # the publish gate refuses the mix rather than pair the new counts with the earlier run's health.
+    generation = {'snapshot': snapshot['captured_at'], 'repos': repos.get('updated_at'), 'meta': meta.get('last_capture_at'),
+                  'queue': data.read_queue_generation(), 'diagnostic': diagnostic.get('captured_at')}
+    page = build_page(date, snapshot['captured_at'], snapshot['threshold'], repos['repos'], counts, data.snapshot_dates(), data.read_snapshot,
+                      data.read_history_all(), first, pending=data.read_pending(), capture=diagnostic.get('completeness'), repair=data.read_repair(),
+                      generation=generation)
     data.write_windows(page)
     return page
 

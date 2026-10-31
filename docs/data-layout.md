@@ -17,9 +17,9 @@ daily capture runs at 05:30 UTC, i.e. 22:30 PDT / 21:30 PST, so a snapshot is da
 |---|---|---|
 | `repos.json` | daily | the known set: `{threshold, updated_at, repos: {node_id: {full_name, language, created_at, first_seen}}}`. No per-day field: today's count is the snapshot's, and a repo was last seen on the newest snapshot that lists it. A repo stays known after it drops below the threshold or is deleted; the page filters by today's count. |
 | `slices.json` | daily | the star-range plan for the next discovery: `[{lo, hi}]`, the last `hi` null (open-ended). Each slice held at most 800 results the day before, so a healthy run lists without probing. |
-| `meta.json` | daily | `first_snapshot_date` (the ring's start), `last_total_count` (+ `_at`, `_source`, `_threshold`: the threshold it counted; an earlier total stands in on a day search cannot answer only for the same threshold), `last_capture_date`. |
-| `history-pending.json` | daily | the progressive-history queue: `{schema, updated_at, repos: {node_id: {since, attempts, last_attempt, last_status}}}`. A repo that enters the set without history is queued (`since` = its first day); it leaves when its history record is written. The daily capture reads at most 400 histories a day (inside a 900 core requests/hour budget, no batch after 110 min) in turn order: `last_attempt` (or `since` before the first attempt), then `since`, so a failing repo goes behind those that waited longer. An eligible repo without history that is not queued (its record went missing) is read first and is never pending. |
-| `snapshots/YYYY/YYYY-MM-DD.json` | daily, forever | `{schema, date, captured_at, threshold, rows, node_id: [...], stars: [...]}`, sorted by node ID, plain compact JSON (not gzipped: git delta-compresses consecutive days). One count per known repo that answered that day. A rerun on the same Pacific day keeps the earlier run's count for a repo it cannot read. |
+| `meta.json` | daily | `first_snapshot_date` (the ring's start), `last_total_count` (+ `_at`, `_source`, `_threshold`: the threshold it counted; an earlier total stands in on a day search cannot answer only for the same threshold), `last_capture_date`, `last_capture_at` (the capture instant: its generation). |
+| `history-pending.json` | daily | the history queues: `{schema, updated_at, repos: {node_id: entry}, repair: {node_id: entry}}`, entry `{since, attempts, last_attempt, last_status}`. A repo that enters the set without a complete history record is queued in `repos` (pending; `since` = its first day); a known eligible repo whose record is missing or incomplete goes to `repair` (never pending). A record is complete when it holds days and either has no older history or reaches more than 366 days before its anchor day; an incomplete read is kept (unless an earlier record reaches further back) and the repo stays queued with `last_status` `incomplete`. The daily capture reads at most 400 histories a day inside a 900 core requests/hour budget, and no history request starts after 110 min (40 of the job's 150 min stay for writing and committing). Each lane is in turn order: `last_attempt` (or `since` before the first attempt), fewer attempts, then `since`, so a failing repo goes behind those that waited longer. Repairs get at most half the day's reads while pending repos wait, and the two lanes are interleaved. |
+| `snapshots/YYYY/YYYY-MM-DD.json` | daily, forever | `{schema, date, captured_at, threshold, rows, node_id: [...], stars: [...]}`, sorted by node ID, plain compact JSON (not gzipped: git delta-compresses consecutive days). One count per known repo that answered that day (a repo the answer says is gone, NOT_FOUND, is left out; one whose read failed or errored is unread, never left out silently). A rerun on the same Pacific day keeps the earlier run's count for a repo it cannot read. |
 | `history/XX.json` | backfill, daily | per-day star history by node ID, 256 shards by the first two hex digits of SHA-1(node ID): `{node_id: {start, days, through, anchor_at, anchor_stars, pages, has_more}}` (below). |
 | `windows/latest.json` | daily, **not committed** | the page-ready file (below). Written by the capture into its working copy and listed in the branch's `.gitignore` (`/windows/`); the publisher rebuilds it from a checkout of the branch with `python3 scripts/build_windows.py --data-dir <checkout>` (same bytes as the capture's). There is no daily copy: a past day's page is that day's snapshot plus the history shards. |
 | `diagnostics/YYYY/YYYY-MM-DD.json` | daily | the run's diagnostic: snapshot read/missing/points, discovery status and slices, entrants, coverage, `counts` (known/new repos read, carried from an earlier run that day, unread after a retry, inaccessible), `history` (queue, read, failed, deferred, pending after), `completeness` (below), the per-window sources, exit code. |
@@ -103,9 +103,14 @@ false (measured exact on 44 of 50 real repos, within 1 star on the other 6).
   - History-sourced cells satisfy 0 ≤ `gain_1d` ≤ `gain_7d` ≤ … ≤ `gain_365d` ≤ `stars`; snapshot-sourced cells may be
     negative (unstars) and are never above `stars`.
     `rows_snapshot`, `rows_history` and `rows_null` per window count these.
-- `history_pending` (0/1 per row) is 1 when the repo is queued in `history-pending.json` and has no history record: its
-  nulls are pending history, counted per window in `rows_pending`, and the publish gate's 1% null rule counts only the other
-  rows. `history` = `{pending_rows, rows_with_history}`.
+- `history_pending` (0/1/2 per row) is non-zero when the repo is queued in `history-pending.json` (`repos`) and its record
+  is not complete: 1 while it waits, 2 once a read failed or came back incomplete. Its nulls are pending history, counted
+  per window in `rows_pending`, and the publish gate's 1% null rule counts only the other rows. `history` =
+  `{pending_rows, pending_retrying, repair_rows, rows_with_history}`.
+- `generation` is the capture instant each input carries (`snapshot` captured_at, `repos` updated_at, `meta`
+  last_capture_at, `queue` updated_at, `diagnostic` captured_at). One complete capture writes the same instant into all of
+  them, its diagnostic last; the publish gate refuses a file whose inputs or diagnostic come from another capture than its
+  `generated_at` (a rerun that stopped after rewriting the snapshot).
 - `capture` is that day's `completeness` from the diagnostic: `{status: complete|partial, reasons, rows, search_total,
   total_count_source, coverage, discovery, known_unread, entrants_unread, inaccessible}`; null for a day captured before it
   existed. `scripts/build_windows.py` reads it and the queue from the committed files, so the rebuild equals the capture's file.
@@ -128,7 +133,8 @@ false (measured exact on 44 of 50 real repos, within 1 star on the other 6).
 | backfill (once, on the Mac): 2 pages × ~34k repos, ≤ 3,000 core/h, plus 1 anchor point per 100 repos | ~66k core + ~340 points | ~22 h, resumable (200 repos: 391 requests in 1.9 min) |
 
 `GITHUB_TOKEN` allows 1,000 core requests and 1,000 GraphQL points an hour per repository, and 30 search requests a minute;
-the daily run stays inside all three. At the 1,000-star set (66,915 repos on 2026-10-31) the snapshot is ~670 queries (~670
-points, 1 per 100 repos) and day one adds ~330 for the ~32,700 new repos' first counts: ~1,000 points spread over a run of more
-than an hour, so the client waits out a primary limit if it is reached. Core requests stay under 900 an hour (`--core-per-hour`). Discovery stops at its deadline (75 min in the workflow) and reports which slices it
+the daily run stays inside all three. On the first capture at the 1,000-star set (66,915 repos on 2026-10-31)
+the known set is still ~34,200 repos, ~343 queries (1 point per 100 repos), and the ~32,700 new repos' first counts add ~330:
+~680 points. From the next day the known set is ~67,000 repos, ~670 queries (~670 points) a day. The client waits out a
+primary limit if one is reached. Core requests stay under 900 an hour (`--core-per-hour`). Discovery stops at its deadline (75 min in the workflow) and reports which slices it
 listed, failed or skipped; the snapshot of the known set never waits for it.
