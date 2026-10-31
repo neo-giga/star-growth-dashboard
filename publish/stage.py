@@ -1,8 +1,11 @@
 """Stage the site from the data branch's `windows/latest.json`, or refuse.
 
 The gate fails closed (the run goes red, nothing is deployed, the current page stays) when the file is older than MAX_AGE_HOURS,
-when `row_count` is under COVERAGE_FLOOR of the search total in that day's diagnostic, or when any gain column is null for more
-than NULL_CEILING of the rows, unless a missed capture explains it (missed_capture_columns).
+when `row_count` is under COVERAGE_FLOOR of the search total in that day's diagnostic, when that diagnostic is not the capture
+the file was built from (its captured_at, or any input's generation, differs from generated_at), when the capture was not
+complete (discovery did not list every slice, no search total that day, or a count batch stayed unread), or when any gain column is null for more than NULL_CEILING of the rows whose history
+is not pending, unless a missed capture explains it (missed_capture_columns). Pending history is the queued entrants whose
+history is not complete yet (`history_pending` 1 or 2, capture/windows.py); a repo whose record went missing is never pending.
 The staged site is the checkout's UI sources (hashed by scripts/build_static_release.py) plus the
 page file (the columnar interface without the node IDs) and the agent feed under api/v2, plus the previous publication's hashed
 script, stylesheet and data files (one generation) so a page loaded before the deploy still finds them. Nothing is committed to git.
@@ -19,7 +22,7 @@ MAX_AGE_HOURS = 36
 COVERAGE_FLOOR = 0.99
 NULL_CEILING = 0.01
 GAIN_COLUMNS = tuple(column(days) for days in WINDOWS)
-COLUMN_NAMES = ('node_id', 'full_name', 'language', 'created_at', 'stars', *GAIN_COLUMNS, 'history_mask')
+COLUMN_NAMES = ('node_id', 'full_name', 'language', 'created_at', 'stars', *GAIN_COLUMNS, 'history_mask')  # history_pending is optional (pending_column)
 PUBLIC_SOURCE_FILES = ('.nojekyll', 'llms.txt', 'docs/agent-feed.md', 'docs/publish-page.yml')
 HASHED_ASSET = re.compile(r'(?:app|style|data(?:-[a-z]+)?)\.[0-9a-f]{16}\.(?:js|css|json)')
 PAGE_ASSET = re.compile(r'data\.[0-9a-f]{16}\.json')
@@ -55,6 +58,10 @@ def validate_windows(doc):
         raise ValueError('row_count must be a nonnegative integer')
     if type(doc.get('threshold')) is not int:
         raise ValueError('threshold must be an integer')
+    if 'history_pending' in (doc.get('columns') or {}):
+        pending = doc['columns']['history_pending']
+        if not isinstance(pending, list) or len(pending) != count or any(value not in (0, 1, 2) or type(value) is not int for value in pending):
+            raise ValueError(f'column history_pending must hold row_count ({count}) values of 0, 1 or 2')
     columns = doc.get('columns')
     if not isinstance(columns, dict):
         raise ValueError('columns must be an object')
@@ -82,13 +89,44 @@ def validate_windows(doc):
     return doc
 
 
+def pending_column(doc):
+    """history_pending per row (0 for a file written before the column existed: no row is exempt)."""
+    return doc['columns'].get('history_pending') or [0] * doc['row_count']
+
+
+def capture_health(diagnostic):
+    """(complete, reasons) of the capture: its `completeness`, or for an older diagnostic, discovery complete with that day's
+    search total."""
+    completeness = diagnostic.get('completeness')
+    if isinstance(completeness, dict):
+        return completeness.get('status') == 'complete', list(completeness.get('reasons') or ([] if completeness.get('status') == 'complete' else ['status not complete']))
+    reasons = []
+    if (diagnostic.get('discovery') or {}).get('status') != 'complete':
+        reasons.append(f'discovery {(diagnostic.get("discovery") or {}).get("status")}')
+    if (diagnostic.get('coverage') or {}).get('total_count_source') != 'search':
+        reasons.append('no search total that day')
+    return not reasons, reasons
+
+
+def count_health(diagnostic):
+    """(known unread, new unread) from the capture diagnostic: its `counts` block, or the failed queries of an older diagnostic."""
+    counts = diagnostic.get('counts') if isinstance(diagnostic, dict) else None
+    if isinstance(counts, dict):
+        return counts.get('known_unread') or 0, counts.get('entrants_unread') or 0
+    snapshot = diagnostic.get('snapshot') if isinstance(diagnostic, dict) else None
+    snapshot = snapshot if isinstance(snapshot, dict) else {}
+    entrants = ((diagnostic.get('new_entrants') or {}).get('snapshot') or {}) if isinstance(diagnostic, dict) else {}
+    return snapshot.get('failed_queries') or 0, entrants.get('failed_queries') or 0
+
+
 def gate(doc, diagnostic, now):
     """(problems, measurements) for a validated windows file against that day's capture diagnostic; an empty problems list passes."""
     problems = []
     generated = parse_instant(doc['generated_at'])
     age_hours = (now - generated).total_seconds() / 3600
     measurements = {'generated_at': doc['generated_at'], 'age_hours': round(age_hours, 2), 'max_age_hours': MAX_AGE_HOURS, 'row_count': doc['row_count'],
-                    'search_total': None, 'coverage': None, 'coverage_floor': COVERAGE_FLOOR, 'null_share': {}, 'null_ceiling': NULL_CEILING, 'null_exempt': missed_capture_columns(doc)}
+                    'search_total': None, 'coverage': None, 'coverage_floor': COVERAGE_FLOOR, 'null_share': {}, 'null_share_not_pending': {}, 'null_ceiling': NULL_CEILING,
+                    'null_exempt': missed_capture_columns(doc), 'pending_rows': 0, 'unread': None, 'capture': doc.get('capture'), 'generation': doc.get('generation')}
     if age_hours > MAX_AGE_HOURS:
         problems.append(f'windows file is {age_hours:.1f} h old (generated {doc["generated_at"]}), over {MAX_AGE_HOURS} h')
     total = None
@@ -96,17 +134,37 @@ def gate(doc, diagnostic, now):
         total = diagnostic['coverage'].get('total_count')
     if type(total) is not int or total <= 0:
         problems.append(f'no search total in the capture diagnostic for {doc["date"]}')
+        measurements['generation'] = doc.get('generation')
     else:
         measurements['search_total'] = total
         measurements['coverage'] = round(doc['row_count'] / total, 4)
         if doc['row_count'] < COVERAGE_FLOOR * total:
             problems.append(f'row_count {doc["row_count"]} is under {COVERAGE_FLOOR:.0%} of the search total {total}')
+        if diagnostic.get('captured_at') != doc['generated_at']:
+            problems.append(f'the diagnostic is from capture {diagnostic.get("captured_at")}, the file from {doc["generated_at"]}: an interrupted run')
+        stale = sorted(name for name, stamp in (doc.get('generation') or {}).items() if stamp is not None and stamp != doc['generated_at'])
+        if stale:
+            problems.append(f'inputs from another capture than {doc["generated_at"]}: {", ".join(stale)}')
+        complete, reasons = capture_health(diagnostic)
+        if not complete:
+            problems.append(f'the capture was partial: {"; ".join(reasons)}')
+        known_unread, new_unread = count_health(diagnostic)
+        measurements['unread'] = {'known': known_unread, 'new': new_unread}
+        if known_unread or new_unread:
+            problems.append(f'the capture left {known_unread} known and {new_unread} new repositories unread (failed count batches)')
+    pending = pending_column(doc)
+    measurements['pending_rows'] = sum(1 for flag in pending if flag)
+    settled = doc['row_count'] - measurements['pending_rows']
     for name in GAIN_COLUMNS:
-        nulls = sum(1 for value in doc['columns'][name] if value is None)
-        share = nulls / doc['row_count'] if doc['row_count'] else 1.0
-        measurements['null_share'][name] = round(share, 4)
+        values = doc['columns'][name]
+        nulls = sum(1 for value in values if value is None)
+        measurements['null_share'][name] = round(nulls / doc['row_count'], 4) if doc['row_count'] else 1.0
+        unexplained = sum(1 for value, flag in zip(values, pending) if value is None and not flag)
+        share = unexplained / settled if settled else (0.0 if doc['row_count'] else 1.0)
+        measurements['null_share_not_pending'][name] = round(share, 4)
         if share > NULL_CEILING and name not in measurements['null_exempt']:
-            problems.append(f'{name} is null for {nulls} of {doc["row_count"]} rows ({share:.1%}), over {NULL_CEILING:.0%}')
+            excluded = f'; {doc["row_count"] - settled} rows with pending history not counted' if settled != doc['row_count'] else ''
+            problems.append(f'{name} is null for {unexplained} of {settled} rows ({share:.1%}), over {NULL_CEILING:.0%}{excluded}')
     return problems, measurements
 
 
@@ -122,8 +180,11 @@ def missed_capture_columns(doc):
 def page_file(doc):
     """The file the page loads: the windows file without the node IDs (a third of its bytes; the page joins nothing by ID)."""
     columns = {name: doc['columns'][name] for name in COLUMN_NAMES if name != 'node_id'}
-    return {'schema': PAGE_FILE_SCHEMA, 'generated_at': doc['generated_at'], 'date': doc['date'], 'threshold': doc['threshold'], 'row_count': doc['row_count'],
-            'first_snapshot_date': doc.get('first_snapshot_date'), 'windows': doc['windows'], 'columns': columns}
+    columns['history_pending'] = pending_column(doc)
+    return {'schema': PAGE_FILE_SCHEMA, 'generated_at': doc['generated_at'], 'date': doc['date'], 'threshold': doc['threshold'], 'min_stars': doc['threshold'] + 1,
+            'row_count': doc['row_count'], 'first_snapshot_date': doc.get('first_snapshot_date'), 'windows': doc['windows'],
+            'history': {'pending_rows': sum(1 for v in columns['history_pending'] if v), **{k: v for k, v in (doc.get('history') or {}).items() if k != 'pending_rows'}},
+            'capture': doc.get('capture'), 'columns': columns}
 
 
 def read_data(data_dir):
@@ -235,6 +296,6 @@ def stage_site(site_dir, data_dir, output_dir, now=None, ignore_gate=False, prev
         total = sum(p.stat().st_size for p in stage.rglob('*') if p.is_file())
         shutil.move(str(stage), str(output))
     return {'output': str(output), 'date': doc['date'], 'generated_at': doc['generated_at'], 'row_count': doc['row_count'], 'threshold': doc['threshold'],
-            'windows': [{k: w.get(k) for k in ('column', 'source', 'exact_since', 'rows_snapshot', 'rows_history', 'rows_null')} for w in doc['windows']],
+            'windows': [{k: w.get(k) for k in ('column', 'source', 'exact_since', 'rows_snapshot', 'rows_history', 'rows_null', 'rows_pending')} for w in doc['windows']],
             'measurements': measurements, 'gate_ignored': sorted(problems) if ignore_gate else [], 'page_file_bytes': len(encoded), 'artifact_bytes': total, 'snapshot_id': catalog['snapshot_id'],
             'previous_generation': sorted(carried), 'previous_generation_note': previous_note}

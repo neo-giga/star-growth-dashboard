@@ -33,6 +33,8 @@ th.sorted[aria-sort=ascending] button.sort::after{content:"↑"}
 th .approx{margin-left:4px}
 .missed{color:var(--muted);font-weight:400;font-size:.8em;margin-left:4px;cursor:help}
 .sort-note{display:none;margin:-12px 0 16px;color:var(--muted);font-size:13px}
+.capture-status{margin:-8px 0 16px;color:var(--muted);font-size:13px;overflow-wrap:anywhere}.capture-status[hidden]{display:none}
+td.gain.pending{font-size:12px;cursor:help}
 td.approx{text-decoration:underline dotted var(--muted);text-underline-offset:3px;cursor:help}
 td{padding:12px;border-bottom:1px solid var(--line);vertical-align:top}
 td:first-child{padding-left:16px}td:last-child{padding-right:16px}

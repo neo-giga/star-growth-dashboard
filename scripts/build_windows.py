@@ -1,7 +1,8 @@
 """Rebuild windows/latest.json from a checkout of the data branch, as of its last capture.
 
 The data branch does not commit windows/latest.json (docs/data-layout.md, "Growth of the branch"): it is derived from the day's
-snapshot, the snapshots N days before it, the history shards, repos.json and meta.json, all of which are committed. The page's
+snapshot, the snapshots N days before it, the history shards, the history queue, repos.json, meta.json and that day's capture
+diagnostic (its completeness), all of which are committed. The page's
 publisher runs this on its checkout of the branch and reads windows/latest.json as before; the bytes equal the capture run's.
 """
 from __future__ import annotations
@@ -20,8 +21,16 @@ def build(data):
     snapshot = json.loads(data.snapshot_path(date).read_bytes())
     counts = dict(zip(snapshot['node_id'], snapshot['stars']))
     first = dt.date.fromisoformat(meta['first_snapshot_date']) if meta.get('first_snapshot_date') else None
-    page = build_page(date, snapshot['captured_at'], snapshot['threshold'], data.read_repos()['repos'], counts, data.snapshot_dates(), data.read_snapshot,
-                      data.read_history_all(), first)
+    path = data.root / 'diagnostics' / date.isoformat()[:4] / f'{date.isoformat()}.json'
+    diagnostic = json.loads(path.read_bytes()) if path.is_file() else {}
+    repos = data.read_repos()
+    # Each input's capture instant: a run that rewrote the snapshot and stopped before its diagnostic leaves them unequal, and
+    # the publish gate refuses the mix rather than pair the new counts with the earlier run's health.
+    generation = {'snapshot': snapshot['captured_at'], 'repos': repos.get('updated_at'), 'meta': meta.get('last_capture_at'),
+                  'queue': data.read_queue_generation(), 'diagnostic': diagnostic.get('captured_at')}
+    page = build_page(date, snapshot['captured_at'], snapshot['threshold'], repos['repos'], counts, data.snapshot_dates(), data.read_snapshot,
+                      data.read_history_all(), first, pending=data.read_pending(), capture=diagnostic.get('completeness'), repair=data.read_repair(),
+                      generation=generation)
     data.write_windows(page)
     return page
 

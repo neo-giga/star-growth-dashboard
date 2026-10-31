@@ -35,7 +35,7 @@ class DailyCaptureWorkflowTests(unittest.TestCase):
         self.assertIn("    - cron: '30 5 * * *'", WORKFLOW)  # before the 07:23 UTC refresh
         self.assertIn("github.ref == 'refs/heads/main'", WORKFLOW); self.assertIn("github.repository == 'neo-giga/star-growth-dashboard'", WORKFLOW)
         self.assertNotIn('\n  push:', WORKFLOW)  # only the schedule and a manual dispatch
-        self.assertRegex(WORKFLOW, r"      threshold:\n        description: .*\n        type: string\n        default: '2000'\n")
+        self.assertRegex(WORKFLOW, r"      threshold:\n        description: .*\n        type: string\n        default: '999'\n")
         self.assertRegex(WORKFLOW, r'      skip_discovery:\n        description: .*\n        type: boolean\n        default: false\n')
         self.assertIn('--threshold "$THRESHOLD" $SKIP_DISCOVERY --workers 4 --deadline-minutes 75', WORKFLOW)
         self.assertIn('python3 -m unittest discover -s tests', WORKFLOW)
@@ -53,7 +53,7 @@ class DailyCaptureWorkflowTests(unittest.TestCase):
         self.assertIn('      - name: Preserve the diagnostic (and an unpushed commit)\n        if: always()\n', job)
         self.assertIn("      - name: Fail the run when coverage is under the floor\n        if: steps.capture.outputs.code != '0'\n", job)
         self.assertEqual(re.findall(r'git push [^\n]*', WORKFLOW), ['git push origin HEAD:refs/heads/data; then exit 0; fi'])  # the data branch only
-        self.assertIn('timeout-minutes: 110', WORKFLOW)
+        self.assertIn('timeout-minutes: 150', WORKFLOW)
 
     def test_the_checkout_and_commit_steps_work_on_a_real_remote(self):
         checkout, commit = step_script('Check out the data branch, or start it'), step_script("Commit the day's files to the data branch")

@@ -3,8 +3,9 @@
 # Publishes the page from the data branch's windows/latest.json: after every daily capture (workflow_run), on a push to main that
 # changes the page or its scripts, and on dispatch. Nothing is committed to git: the site is rebuilt as the Pages artifact from the
 # repository's UI sources plus the data branch, and deployed exactly as staged. The gate (scripts/publish_page.py) fails closed: a
-# file older than 36 h, a row count under 99% of that day's search total, or a gain column null for more than 1% of rows ends the
-# run red before the upload and deploy steps, and the current page stays. A column a missed capture left without its baseline
+# file older than 36 h, a row count under 99% of that day's search total, a count batch the capture left unread, or a gain column
+# null for more than 1% of the rows whose history is not pending ends the run red before the upload and deploy steps, and the
+# current page stays. A column a missed capture left without its baseline
 # (on or after its exact_since) is exempt from the null rule for that day.
 name: Publish the page
 on:
@@ -58,7 +59,7 @@ jobs:
           # The branch does not commit windows/latest.json: rebuild it from the checkout (same bytes as the capture's). Exit 2 = no
           # capture yet: red here, nothing staged.
           python3 scripts/build_windows.py --data-dir data-branch
-          # 0: staged, deploy it. 2: refused by the gate (stale, under 99% of the search total, a gain column over 1% null) or
+          # 0: staged, deploy it. 2: refused by the gate (stale, under 99% of the search total, unread counts, a gain column over 1% null) or
           # failed: nothing staged, the current page stays, the run is red here. The live page's hashed assets are carried for
           # one deploy, so a page loaded before it still finds them; a pre-v3 live page's are not.
           python3 scripts/publish_page.py --site-dir . --data-dir data-branch --output-dir "$RUNNER_TEMP/site" \

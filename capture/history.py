@@ -52,7 +52,8 @@ def anchored_reads(gh, batch, read, wall, requests_per_repo=1, max_age=MAX_ANCHO
     itself failed after its retries: unread, try again later) or 'error' (read raised GitHubError, the result).
     The batch's core budget is waited for before its anchors are read, so a throttle wait never sits between an anchor and its
     read; a repo whose read would start, or did end, more than max_age after its anchor is anchored again (and read again, once).
-    stats (a dict) collects anchor_points and anchor_queries."""
+    stats (a dict) collects anchor_points and anchor_queries. When the client's deadline passes, GitHubError('deadline') is raised
+    out of the batch (before the next repo, or from a read), never reported as one repo's failure."""
     stats = stats if stats is not None else {}
     gh.wait_core(len(batch) * requests_per_repo)
     state = {'at': None, 'rows': {}, 'failed': set()}
@@ -60,7 +61,7 @@ def anchored_reads(gh, batch, read, wall, requests_per_repo=1, max_age=MAX_ANCHO
     def anchor(ids):
         failed = []
         state['at'] = wall()
-        state['rows'], counted = read_counts(gh, ids, workers=1, failed=failed)
+        state['rows'], counted = read_counts(gh, ids, workers=1, failed=failed, stop_on_deadline=True)  # a deadline ends the batch
         state['failed'] = set(failed)
         stats['anchor_points'] = stats.get('anchor_points', 0) + counted['points']
         stats['anchor_queries'] = stats.get('anchor_queries', 0) + counted['queries']
@@ -68,10 +69,16 @@ def anchored_reads(gh, batch, read, wall, requests_per_repo=1, max_age=MAX_ANCHO
     def stale():
         return state['at'] is None or (wall() - state['at']).total_seconds() > max_age
 
+    def check_deadline():
+        if gh.deadline is not None and gh.clock() >= gh.deadline:
+            raise GitHubError('deadline', 'the deadline has passed')
+
     for k, node_id in enumerate(batch):
         for attempt in (1, 2):
+            check_deadline()
             if stale():
                 anchor(batch[k:])
+                check_deadline()  # an anchor query cut by the deadline is not a failed anchor
             if node_id in state['failed']:
                 yield node_id, 'failed', state['at'], None, None
                 break
@@ -82,6 +89,8 @@ def anchored_reads(gh, batch, read, wall, requests_per_repo=1, max_age=MAX_ANCHO
             try:
                 result = read(row['full_name'])
             except GitHubError as error:
+                if error.status == 'deadline':
+                    raise
                 yield node_id, 'error', state['at'], row, error
                 break
             if attempt == 1 and stale():
@@ -114,6 +123,17 @@ def fold(weeks, anchor_at, anchor_stars, pages, has_more):
         days.extend([0] * (keep - len(days)))
     return {'start': start.isoformat(), 'days': days, 'through': through.isoformat(), 'anchor_at': anchor_at.isoformat(),
             'anchor_stars': anchor_stars, 'pages': pages, 'has_more': has_more}
+
+
+def record_complete(record):
+    """True when a folded record can serve every window: it holds days, and either no older history exists or it reaches back
+    more than the longest window before its anchor day. An empty record, or one page of a repo with older weeks unread, is not
+    complete: the repo stays queued (or in repair) and is read again in turn."""
+    if not record or record.get('start') is None:
+        return False
+    if not record.get('has_more'):
+        return True
+    return dt.date.fromisoformat(record['start']) <= dt.date.fromisoformat(record['through']) - dt.timedelta(days=max(WINDOWS) + 1)
 
 
 def stars_between(record, first, last):

@@ -5,6 +5,7 @@ slices.json                     the next discovery's star-range plan
 meta.json                       first_snapshot_date, last_total_count, last_capture_date
 snapshots/YYYY/YYYY-MM-DD.json  one star count per known repo per Pacific day, kept forever (plain JSON: git delta-compresses it between days)
 history/XX.json                 per-day star history by node ID, 256 shards by the SHA-1 of the ID
+history-pending.json            the history queues: entrants waiting for history (pending) and known repos whose record must be repaired
 windows/latest.json             the page-ready file (the interface the page builds on), not committed (.gitignore): scripts/build_windows.py derives it
 diagnostics/YYYY/YYYY-MM-DD.json    the day's run diagnostic
 Every write is atomic (temporary file + rename), so a killed run leaves whole files only.
@@ -14,6 +15,7 @@ import datetime as dt, hashlib, json, os, pathlib, tempfile
 
 SNAPSHOT_SCHEMA = 'star-growth-dashboard/snapshot/1'
 HISTORY_SHARDS = 256
+PENDING_SCHEMA = 'star-growth-dashboard/history-pending/1'
 
 
 def write_atomic(path, data: bytes):
@@ -62,6 +64,22 @@ class DataDir:
 
     def write_slices(self, plan):
         write_atomic(self.root / 'slices.json', dumps(plan, compact=False))
+
+    def read_pending(self):
+        """{node_id: {since, attempts, last_attempt, last_status}}: entrants whose history is not read yet (docs/data-layout.md)."""
+        return self._read_json('history-pending.json', {'repos': {}}).get('repos') or {}
+
+    def read_repair(self):
+        """{node_id: {since, attempts, last_attempt, last_status}}: known repos whose history record is missing or incomplete. Never pending."""
+        return self._read_json('history-pending.json', {}).get('repair') or {}
+
+    def read_queue_generation(self):
+        """The updated_at of history-pending.json (the capture that wrote it), or None when there is no queue file."""
+        return self._read_json('history-pending.json', {}).get('updated_at')
+
+    def write_pending(self, repos, updated_at, repair=None):
+        write_atomic(self.root / 'history-pending.json', dumps({'schema': PENDING_SCHEMA, 'updated_at': updated_at, 'repos': dict(sorted(repos.items())),
+                                                                'repair': dict(sorted((repair or {}).items()))}))
 
     def read_meta(self):
         return self._read_json('meta.json', {})
