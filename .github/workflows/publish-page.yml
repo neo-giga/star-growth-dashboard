@@ -1,0 +1,88 @@
+# INSTALLED at .github/workflows/publish-page.yml (keep this copy identical); Pages source: GitHub Actions.
+# Approved job-scoped permissions for the public dashboard repository only.
+# Publishes the page from the data branch's windows/latest.json: after every daily capture (workflow_run), on a push to main that
+# changes the page or its scripts, and on dispatch. Nothing is committed to git: the site is rebuilt as the Pages artifact from the
+# repository's UI sources plus the data branch, and deployed exactly as staged. The gate (scripts/publish_page.py) fails closed: a
+# file older than 36 h, a row count under 99% of that day's search total, or a gain column null for more than 1% of rows ends the
+# run red before the upload and deploy steps, and the current page stays. A column a missed capture left without its baseline
+# (on or after its exact_since) is exempt from the null rule for that day.
+name: Publish the page
+on:
+  workflow_run:
+    workflows: ['Daily star capture']
+    types: [completed]
+  push:
+    branches: [main]
+    # A merged UI/source change re-publishes the data branch's current file with the new UI.
+    paths:
+      - index.html
+      - app.js
+      - style.css
+      - llms.txt
+      - docs/agent-feed.md
+      - scripts/**
+      - publish/**
+      - capture/**
+      - .github/workflows/publish-page.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: public-feed-publication
+  cancel-in-progress: false
+jobs:
+  publish:
+    if: github.repository == 'neo-giga/star-growth-dashboard' && github.ref == 'refs/heads/main' && (github.event_name != 'workflow_run' || github.event.workflow_run.head_branch == 'main')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Unit checks (no network fixtures)
+        run: python3 -m unittest discover -s tests
+      - name: Read the data branch
+        run: |
+          git fetch --no-tags --depth=1 origin data
+          git worktree add --detach data-branch FETCH_HEAD
+      - name: Stage the page from windows/latest.json, or refuse
+        run: |
+          # The branch does not commit windows/latest.json: rebuild it from the checkout (same bytes as the capture's). Exit 2 = no
+          # capture yet: red here, nothing staged.
+          python3 scripts/build_windows.py --data-dir data-branch
+          # 0: staged, deploy it. 2: refused by the gate (stale, under 99% of the search total, a gain column over 1% null) or
+          # failed: nothing staged, the current page stays, the run is red here. The live page's hashed assets are carried for
+          # one deploy, so a page loaded before it still finds them; a pre-v3 live page's are not.
+          python3 scripts/publish_page.py --site-dir . --data-dir data-branch --output-dir "$RUNNER_TEMP/site" \
+            --previous-site https://neo-giga.github.io/star-growth-dashboard/ --diagnostic "$RUNNER_TEMP/publish-diagnostic.json"
+      - name: Preserve the diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: publish-diagnostic-${{ github.run_id }}
+          path: ${{ runner.temp }}/publish-diagnostic.json
+          retention-days: 7
+          if-no-files-found: ignore
+      - name: Refuse to deploy a stale run
+        run: |
+          # Deploy only when live main's UI/scripts/workflow (the push trigger's paths, scripts/deploy_paths.py) match this run's:
+          # a stale run must never roll Pages back to an older UI, and a newer tests/docs-only commit must not strand this one.
+          # The run that the newer sources triggered publishes the same data branch file with them.
+          git fetch --no-tags --depth=1 origin refs/heads/main
+          python3 scripts/deploy_paths.py HEAD FETCH_HEAD
+      - name: Upload exact staged Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/site
+          retention-days: 7
+      - name: Deploy exact artifact
+        id: deployment
+        uses: actions/deploy-pages@v4

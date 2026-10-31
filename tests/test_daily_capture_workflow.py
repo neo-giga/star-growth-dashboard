@@ -4,7 +4,7 @@ existing branch, a failed fetch, a concurrent push)."""
 import os, pathlib, re, shutil, subprocess, tempfile, unittest
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 WORKFLOW = (ROOT / '.github/workflows/daily-capture.yml').read_text()
-WEEKLY = (ROOT / '.github/workflows/weekly-refresh.yml').read_text()
+WEEKLY = (ROOT / '.github/workflows/publish-page.yml').read_text()
 
 
 def step_script(name):

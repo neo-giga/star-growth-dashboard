@@ -1,12 +1,12 @@
 """Refuse to deploy a run whose UI/scripts are not live main's: compare the digest of the deploy-relevant paths at two revisions.
 
-DEPLOY_PATHS is exactly the push trigger's path filter in .github/workflows/weekly-refresh.yml (tests/test_workflow.py asserts
-the two lists match). A change on main outside them (tests, docs) leaves the digest equal, so it never strands a running refresh
-or UI release; a change inside them triggers its own run, so this one stops and that one publishes.
+DEPLOY_PATHS is exactly the push trigger's path filter in .github/workflows/publish-page.yml (tests/test_publish_workflow.py asserts
+the two lists match). A change on main outside them (tests, docs) leaves the digest equal, so it never strands a running
+publication; a change inside them triggers its own run, so this one stops and that one publishes.
 """
 import argparse, hashlib, subprocess, sys
-DEPLOY_PATHS = ('index.html', 'app.js', 'style.css', 'llms.txt', 'docs/agent-feed.md', 'scripts/**', 'trending/**',
-                '.github/workflows/weekly-refresh.yml')
+DEPLOY_PATHS = ('index.html', 'app.js', 'style.css', 'llms.txt', 'docs/agent-feed.md', 'scripts/**', 'publish/**', 'capture/**',
+                '.github/workflows/publish-page.yml')
 
 
 def digest(rev, cwd='.'):
