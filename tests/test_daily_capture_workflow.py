@@ -17,14 +17,14 @@ class DailyCaptureWorkflowTests(unittest.TestCase):
 
     def test_github_token_only_and_contents_write_on_the_capture_job_only(self):
         self.assertEqual(re.findall(r'\$\{\{ *secrets\.[A-Za-z_]+ *\}\}', WORKFLOW), [])
-        self.assertEqual(re.findall(r'\$\{\{ *(github\.token|secrets\.GITHUB_TOKEN) *\}\}', WORKFLOW), ['github.token'])
+        self.assertEqual(re.findall(r'\$\{\{ *(github\.token|secrets\.GITHUB_TOKEN) *\}\}', WORKFLOW), ['github.token', 'github.token'])  # capture + the branch-only probe
         self.assertIn('GH_TOKEN: ${{ github.token }}', WORKFLOW)
         self.assertNotRegex(WORKFLOW, r'\bPAT\b|(?i:personal.access|STARS_TOKEN)')
         top, job = WORKFLOW.split('jobs:\n', 1)
         self.assertRegex(top, r'\npermissions:\n  contents: read\n')
         self.assertEqual(job.count('contents: write'), 1); self.assertEqual(WORKFLOW.count('contents: write'), 1)
         self.assertRegex(job, r'^  capture:\n(?:    .*\n)*?    permissions:\n      contents: write  #.*\n    steps:\n')
-        self.assertEqual(re.findall(r'^  \w+:\n', job, re.M), ['  capture:\n'])  # one job
+        self.assertEqual(re.findall(r'^  [\w-]+:\n', job, re.M), ['  capture:\n', '  metadata-budget-probe:\n'])  # capture + the branch-only probe
         self.assertNotRegex(job, r'\n      (pages|id-token|actions): ')
 
     def test_no_pages_step_and_a_separate_concurrency_group(self):
@@ -41,7 +41,7 @@ class DailyCaptureWorkflowTests(unittest.TestCase):
         self.assertIn('python3 -m unittest discover -s tests', WORKFLOW)
 
     def test_the_days_files_are_committed_whatever_the_exit_code_and_the_run_goes_red_after(self):
-        job = WORKFLOW.split('    steps:\n', 1)[1]
+        job = WORKFLOW.split('    steps:\n', 1)[1].split('\n  metadata-budget-probe:\n')[0]
         names = re.findall(r'      - name: (.*)\n', job)
         capture, commit, keep, red = (names.index(n) for n in ('Capture today\'s star counts', 'Commit the day\'s files to the data branch',
                                                                'Preserve the diagnostic (and an unpushed commit)', 'Fail the run when coverage is under the floor'))

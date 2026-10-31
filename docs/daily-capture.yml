@@ -103,3 +103,30 @@ jobs:
         run: |
           echo "capture exit code ${{ steps.capture.outputs.code }} (3 = coverage under 99% of the search total; see capture-diagnostic-${{ github.run_id }})" >&2
           exit 1
+  metadata-budget-probe:
+    # THROWAWAY: measures the cost of descriptions and topics on branch agent-metadata-probe only; this branch is never merged.
+    # Read-only: no write permission, no data branch, no push, no Pages; it uploads metrics and public metadata as an artifact.
+    if: github.repository == 'neo-giga/star-growth-dashboard' && github.ref == 'refs/heads/agent-metadata-probe' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Probe unit checks (no network)
+        run: python3 -m unittest tests.test_metadata_budget_probe
+      - name: Three read-only metadata queries on the 100-ID fixture
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/metadata_budget_probe.py --fixture tests/fixtures/metadata-probe-ids.json --out "$RUNNER_TEMP/metadata-probe"
+      - name: Upload the probe's metrics and public metadata
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: metadata-budget-probe-${{ github.run_id }}
+          path: ${{ runner.temp }}/metadata-probe
+          retention-days: 14
+          if-no-files-found: error
