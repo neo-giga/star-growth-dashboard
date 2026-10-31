@@ -5,7 +5,7 @@ import datetime as dt, importlib.util, json, pathlib, re, shutil, sys, tempfile,
 from unittest import mock
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from capture.github import GitHub
-from capture.snapshot import classify
+from capture import snapshot
 from capture.store import DataDir
 from fake_github import FakeClock, make_world
 from publish import stage as st
@@ -67,9 +67,9 @@ class GraphQLPartialErrorTests(Harness):
     def test_classify_only_not_found_or_errorless_nulls_are_gone(self):
         data = {'nodes': [{'id': 'A', 'nameWithOwner': 'o/a', 'stargazerCount': 5}, None, None, None]}
         errors = [{'type': 'NOT_FOUND', 'path': ['nodes', 1]}, {'type': 'SERVICE_UNAVAILABLE', 'path': ['nodes', 2]}]
-        rows, missing, unresolved = classify(['A', 'B', 'C', 'D'], data, errors)
+        rows, missing, unresolved = snapshot.classify(['A', 'B', 'C', 'D'], data, errors)
         self.assertEqual((list(rows), missing, unresolved), (['A'], ['B', 'D'], ['C']))
-        self.assertEqual(classify(['A', 'B'], {'nodes': [None, None]}, [{'type': 'TIMEOUT', 'message': 'no path'}])[2], ['A', 'B'])
+        self.assertEqual(snapshot.classify(['A', 'B'], {'nodes': [None, None]}, [{'type': 'TIMEOUT', 'message': 'no path'}])[2], ['A', 'B'])
 
     def test_an_http_200_with_errored_nodes_is_unread_red_and_refused_not_dropped(self):
         self.run_day(0, max_history=0)
@@ -182,6 +182,23 @@ class StaticTextTests(unittest.TestCase):
         self.assertIn('id="min-stars"', html)
         self.assertNotRegex(html, r'(above|at least) [\d,]+ stars')
         self.assertNotRegex((ROOT / 'llms.txt').read_text().split('\n', 1)[0], r'[\d,]{4,} stars')
+
+    def test_the_readme_leads_with_agents_and_says_topic_queries_are_not_live(self):
+        readme = (ROOT / 'README.md').read_text()
+        lead = readme.split('\n## ', 1)[0]
+        self.assertIn('machine-readable GitHub repository discovery dataset for agents', lead)
+        for harness in ('Claude Code', 'Muse', 'Grok'):
+            self.assertIn(harness, lead)
+        self.assertLess(lead.index('api/v2/catalog.json'), lead.index('https://neo-giga.github.io/star-growth-dashboard/**'))  # feed first, page second
+        self.assertRegex(lead, r'secondary human explorer'); self.assertRegex(lead, r'(?s)Not live yet.*topic or task queries.*not implemented')
+        differs = readme.split('## How this differs from existing solutions', 1)[1].split('\n## ', 1)[0]
+        for needle in ('https://www.star-history.com/', 'https://www.star-history.com/compare', 'https://www.star-history.com/blog/new-github-star-history-api',
+                       'Star Map', 'embeds', 'ranking', 'neither has exclusive or more'):
+            self.assertIn(needle, differs)
+        self.assertIn('A partial day is not published', readme)
+        for doc in ('llms.txt', 'docs/agent-feed.md'):
+            text = (ROOT / doc).read_text()
+            self.assertIn('agents', text.split('\n\n', 2)[0] + text.split('\n\n', 2)[1]); self.assertRegex(text, r'planned follow-on, not live')
 
 
 if __name__ == '__main__':
