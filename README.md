@@ -34,9 +34,9 @@ snapshots, and the other six columns from history with 290 nulls each (0.85%).
 | `main`: `tests/` | the unit suite (no network: `tests/fake_github.py`) |
 | `data` (orphan branch) | `repos.json`, `slices.json`, `meta.json`, `snapshots/YYYY/YYYY-MM-DD.json`, `history/XX.json`, `diagnostics/`; layout and semantics in [docs/data-layout.md](docs/data-layout.md) |
 
-`main` still carries published files from the earlier upstream-feed site (`data*.json`, hashed `app.*.js` / `style.*.css`,
-`api/v1/`). Nothing serves or reads them; [PR #9](https://github.com/neo-giga/star-growth-dashboard/pull/9)
-deletes them. The `api/v1` feed is no longer published.
+The published files left over from the earlier upstream-feed site (`data*.json`, hashed `app.*.js` / `style.*.css`,
+`api/v1/`) were removed from `main` by [PR #9](https://github.com/neo-giga/star-growth-dashboard/pull/9). The `api/v1`
+feed is no longer published.
 
 ## The two workflows
 
@@ -86,10 +86,12 @@ history records, `windows/latest.json`, budget).
 
 ## Live details and rate limits
 
-Expanding a row calls `api.github.com` from the browser, unauthenticated: the repository record plus three counts
-(contributors, issue comments, PR review comments), four requests per expansion. GitHub allows 60 unauthenticated requests
-per hour per IP, so about fifteen expansions. Definite answers are cached in the tab's `sessionStorage`; at the limit the
-panel shows `GitHub limit reached — resets HH:MM` and the fields stay `—` until then. The ranking itself never calls GitHub.
+Expanding a row calls `api.github.com` from the browser, unauthenticated: the repository record
+plus three counts (contributors, issue comments, PR review comments), four requests per expansion.
+GitHub allows 60 unauthenticated requests per hour per IP, so about fifteen expansions. Definite
+answers are cached in the tab's `sessionStorage`; at the limit the panel shows
+`GitHub limit reached — resets HH:MM` and the fields stay `—` until then. The ranking itself never
+calls GitHub.
 
 ## Local preview and testing
 
@@ -104,7 +106,6 @@ git fetch origin data && git worktree add --detach "$out/data" FETCH_HEAD
 python3 scripts/build_windows.py --data-dir "$out/data"        # writes windows/latest.json (gitignored there)
 python3 scripts/publish_page.py --site-dir . --data-dir "$out/data" --output-dir "$out/site"   # --output-dir must not exist
 python3 -m http.server -d "$out/site" 8000                      # then open http://localhost:8000/
-git worktree remove "$out/data"                                 # when done
 ```
 
 `publish_page.py` exits `2` and stages nothing when the gate refuses; add `--ignore-gate` to preview anyway.
@@ -116,6 +117,8 @@ python3 scripts/daily_capture.py --data-dir "$out/data" --dry-run --skip-discove
 ```
 
 The dry run writes into a temporary directory it prints and never touches the checkout.
+
+When done with both, remove the `data` checkout: `git worktree remove "$out/data"`.
 
 ## Troubleshooting
 
