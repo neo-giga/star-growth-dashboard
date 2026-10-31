@@ -30,7 +30,7 @@ class WindowsTests(unittest.TestCase):
         self.assertEqual(page['columns']['gain_15d'], [None] * 3); self.assertEqual(page['columns']['history_mask'], [0, 0, 0])
         self.assertEqual(page['first_snapshot_date'], '2026-11-02'); self.assertEqual(page['threshold'], 10); self.assertEqual(page['date'], '2026-11-10')
         self.assertEqual([w['days'] for w in page['windows']], [1, 7, 15, 30, 90, 180, 365])
-        self.assertEqual(list(page['columns']), ['node_id', 'full_name', 'language', 'created_at', 'stars'] + [column(n) for n in (1, 7, 15, 30, 90, 180, 365)] + ['history_mask'])
+        self.assertEqual(list(page['columns']), ['node_id', 'full_name', 'language', 'created_at', 'stars'] + [column(n) for n in (1, 7, 15, 30, 90, 180, 365)] + ['history_mask', 'history_pending'])
 
     def test_history_windows_add_the_days_in_the_window_to_the_change_since_the_anchor(self):
         # history read on 11-08 (anchor 11-08 22:00 UTC = 14:00 PST, 900 stars), the day buckets 11-01..11-08 are 1..8 (the 8th partial); today 950

@@ -101,7 +101,7 @@ class PageFileTests(unittest.TestCase):
     def test_the_page_file_is_the_interface_without_node_ids(self):
         page = st.page_file(FIXTURE)
         self.assertEqual(page['schema'], 'star-growth-dashboard/page/1'); self.assertNotIn('node_id', page['columns'])
-        self.assertEqual(list(page['columns']), ['full_name', 'language', 'created_at', 'stars', *st.GAIN_COLUMNS, 'history_mask'])
+        self.assertEqual(list(page['columns']), ['full_name', 'language', 'created_at', 'stars', *st.GAIN_COLUMNS, 'history_mask', 'history_pending'])
         for key in ('generated_at', 'date', 'threshold', 'row_count', 'first_snapshot_date', 'windows'):
             self.assertEqual(page[key], FIXTURE[key])
         self.assertIs(page['columns']['gain_7d'], FIXTURE['columns']['gain_7d'])
@@ -142,7 +142,7 @@ class AgentFeedTests(unittest.TestCase):
             md = (root / 'snapshots' / catalog['snapshot_id'] / 'top100/gain_7d.md').read_text()
             self.assertIn('| Repository | Stars | Gain 7d | Source |', md); self.assertEqual(md.count('\n| '), 101)
             csv_head = (root / 'snapshots' / catalog['snapshot_id'] / 'all.csv').read_text().splitlines()[0]
-            self.assertEqual(csv_head, 'node_id,full_name,github_url,language,created_at,stars,gain_1d,gain_7d,gain_15d,gain_30d,gain_90d,gain_180d,gain_365d,history_windows')
+            self.assertEqual(csv_head, 'node_id,full_name,github_url,language,created_at,stars,gain_1d,gain_7d,gain_15d,gain_30d,gain_90d,gain_180d,gain_365d,history_windows,history_pending')
             schema = json.loads((root / 'schema.json').read_text())
             self.assertEqual(schema['$id'], 'star-growth-dashboard/agent-feed/2'); self.assertEqual(schema['properties']['gains']['required'], ['1d', '7d', '15d', '30d', '90d', '180d', '365d'])
             self.assertEqual((root / 'snapshots' / catalog['snapshot_id'] / 'schema.json').read_bytes(), (root / 'schema.json').read_bytes())

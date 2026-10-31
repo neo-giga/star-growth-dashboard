@@ -186,22 +186,28 @@ class DailyCaptureTests(unittest.TestCase):
         self.assertNotIn(node_id, page['columns']['node_id']); self.assertIn(node_id, self.data.read_repos()['repos'])
         self.assertEqual(self.data.read_snapshot(dt.date(2026, 3, 10))[node_id], 0)
 
-    def test_history_reads_are_capped_per_day_with_entrants_first_and_the_rest_caught_up_later(self):
+    def test_history_reads_are_capped_per_day_oldest_turn_first_and_the_rest_caught_up_later(self):
         code, diag = self.run_day(0, max_history=100)
         above0 = self.above(self.world.now)
         self.assertEqual((diag['new_entrants']['count'], diag['new_entrants']['history_pending'], diag['new_entrants']['history_read']), (len(above0), len(above0), 100))
         self.assertEqual(len(self.data.read_history_all()), 100)
         page = json.loads((self.data.root / 'windows/latest.json').read_text())
         self.assertEqual(sum(1 for v in page['columns']['gain_7d'] if v is None), len(above0) - 100)
+        self.assertEqual(page['history']['pending_rows'], len(above0) - 100); self.assertEqual(sum(page['columns']['history_pending']), len(above0) - 100)
+        self.assertEqual(page['windows'][1]['rows_pending'], len(above0) - 100)  # every null is pending history, none unexplained
+        left0 = above0 - set(self.data.read_history_all())
         code, diag = self.run_day(1, max_history=100)
         entrants = self.above(self.world.now) - above0
         self.assertEqual(diag['new_entrants']['count'], len(entrants))
         history = self.data.read_history_all()
-        self.assertTrue(entrants <= set(history), 'the day\'s entrants are read first')  # entrants first, then the oldest pending
+        self.assertFalse(entrants & set(history), "yesterday's leftovers have waited longer than today's entrants")
         self.assertEqual(len(history), 200); self.assertEqual(diag['new_entrants']['history_pending'], len(above0) + len(entrants) - 100)
+        self.assertEqual(diag['history']['pending_after'], len(above0) + len(entrants) - 200)
+        self.assertEqual(set(self.data.read_pending()), (left0 | entrants) - set(history))
         for k in range(2, 6):
             self.run_day(k, max_history=100)
         self.assertEqual(self.data.read_repos()['repos'].keys(), self.data.read_history_all().keys())
+        self.assertEqual(self.data.read_pending(), {})
 
     def test_an_empty_known_set_without_discovery_writes_nothing_and_exits_2(self):
         code, diag = self.run_day(0, skip_discovery=True)

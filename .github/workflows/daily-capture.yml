@@ -1,5 +1,5 @@
 # INSTALLED at .github/workflows/daily-capture.yml (keep this copy identical).
-# Daily star-count capture of every public repository above the threshold, committed to the orphan `data` branch and kept forever.
+# Daily star-count capture of every public repository with at least 1,000 stars (more than the threshold, 999), committed to the orphan `data` branch and kept forever.
 # Separate from the public feed refresh (weekly-refresh.yml) so it reverts on its own: its own concurrency group, GITHUB_TOKEN only
 # (no new secret), write access to the repository granted to this one job only, and no Pages step. Losing a day of data is worse than a red run: the day's
 # files are committed whatever the capture's exit code, and the run goes red afterwards when coverage is under the floor.
@@ -10,9 +10,9 @@ on:
   workflow_dispatch:
     inputs:
       threshold:
-        description: 'Capture repositories with more stars than this'
+        description: 'Capture repositories with more stars than this (999 = at least 1,000)'
         type: string
-        default: '2000'
+        default: '999'
       skip_discovery:
         description: 'Snapshot the known set only; no search for new repositories'
         type: boolean
@@ -26,7 +26,7 @@ jobs:
   capture:
     if: github.repository == 'neo-giga/star-growth-dashboard' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 110
+    timeout-minutes: 150  # day one of the 1,000-star set reads ~33k new counts; history stops at 110 min (HISTORY_DEADLINE_MINUTES)
     permissions:
       contents: write  # commit the day's files to the data branch; this job only
     steps:
@@ -52,7 +52,7 @@ jobs:
         id: capture
         env:
           GH_TOKEN: ${{ github.token }}
-          THRESHOLD: ${{ inputs.threshold || '2000' }}
+          THRESHOLD: ${{ inputs.threshold || '999' }}
           SKIP_DISCOVERY: ${{ inputs.skip_discovery && '--skip-discovery' || '' }}
         run: |
           set +e
@@ -60,7 +60,7 @@ jobs:
             --diagnostic "$RUNNER_TEMP/capture-diagnostic.json"
           code=$?
           echo "code=$code" >> "$GITHUB_OUTPUT"
-          # 0: fine. 3: written, but coverage is under the floor. Anything else: a crash. The files are committed first in every case.
+          # 0: fine. 3: written, but coverage is under the floor or a count batch stayed unread. Anything else: a crash. The files are committed first in every case.
           exit 0
       - name: Commit the day's files to the data branch
         if: always()
@@ -101,5 +101,5 @@ jobs:
       - name: Fail the run when coverage is under the floor
         if: steps.capture.outputs.code != '0'
         run: |
-          echo "capture exit code ${{ steps.capture.outputs.code }} (3 = coverage under 99% of the search total; see capture-diagnostic-${{ github.run_id }})" >&2
+          echo "capture exit code ${{ steps.capture.outputs.code }} (3 = coverage under 99% of the search total or unread count batches; see capture-diagnostic-${{ github.run_id }})" >&2
           exit 1

@@ -1,10 +1,12 @@
-# The `data` branch: daily star counts of every public repository above 2,000 stars
+# The `data` branch: daily star counts of every public repository with at least 1,000 stars
 
 An orphan branch, written once a day by `.github/workflows/daily-capture.yml` (`scripts/daily_capture.py`) and once by the
 one-time backfill (`scripts/backfill_history.py`, run on a Mac with a personal token). The page is published from it by
 `.github/workflows/publish-page.yml` (`scripts/publish_page.py`) through `windows/latest.json`, which is the interface described last
 and in most detail. Forks are in the set:
-every search query says `fork:true` (34,193 repositories above 2,000 stars on 2026-10-29, 302 of them forks).
+every search query says `fork:true` (34,193 repositories above 2,000 stars on 2026-10-29, 302 of them forks). The threshold
+is exclusive (`stars:>threshold`); the workflow passes 999, so the set is every repository with at least 1,000 stars (66,915
+in search on 2026-10-31; `stars:>=1000` and `stars:>999` gave the same total). A threshold of 2000 keeps its old meaning.
 
 All dates are **US Pacific calendar dates**: GitHub's star history is bucketed by Pacific day (measured 2026-10-29), and the
 daily capture runs at 05:30 UTC, i.e. 22:30 PDT / 21:30 PST, so a snapshot is dated the Pacific day it ends.
@@ -15,11 +17,12 @@ daily capture runs at 05:30 UTC, i.e. 22:30 PDT / 21:30 PST, so a snapshot is da
 |---|---|---|
 | `repos.json` | daily | the known set: `{threshold, updated_at, repos: {node_id: {full_name, language, created_at, first_seen}}}`. No per-day field: today's count is the snapshot's, and a repo was last seen on the newest snapshot that lists it. A repo stays known after it drops below the threshold or is deleted; the page filters by today's count. |
 | `slices.json` | daily | the star-range plan for the next discovery: `[{lo, hi}]`, the last `hi` null (open-ended). Each slice held at most 800 results the day before, so a healthy run lists without probing. |
-| `meta.json` | daily | `first_snapshot_date` (the ring's start), `last_total_count` (+ `_at`, `_source`: `search` or `previous`), `last_capture_date`. |
-| `snapshots/YYYY/YYYY-MM-DD.json` | daily, forever | `{schema, date, captured_at, threshold, rows, node_id: [...], stars: [...]}`, sorted by node ID, plain compact JSON (not gzipped: git delta-compresses consecutive days). One count per known repo that answered that day. |
+| `meta.json` | daily | `first_snapshot_date` (the ring's start), `last_total_count` (+ `_at`, `_source`, `_threshold`: the threshold it counted; an earlier total stands in on a day search cannot answer only for the same threshold), `last_capture_date`. |
+| `history-pending.json` | daily | the progressive-history queue: `{schema, updated_at, repos: {node_id: {since, attempts, last_attempt, last_status}}}`. A repo that enters the set without history is queued (`since` = its first day); it leaves when its history record is written. The daily capture reads at most 400 histories a day (inside a 900 core requests/hour budget, no batch after 110 min) in turn order: `last_attempt` (or `since` before the first attempt), then `since`, so a failing repo goes behind those that waited longer. An eligible repo without history that is not queued (its record went missing) is read first and is never pending. |
+| `snapshots/YYYY/YYYY-MM-DD.json` | daily, forever | `{schema, date, captured_at, threshold, rows, node_id: [...], stars: [...]}`, sorted by node ID, plain compact JSON (not gzipped: git delta-compresses consecutive days). One count per known repo that answered that day. A rerun on the same Pacific day keeps the earlier run's count for a repo it cannot read. |
 | `history/XX.json` | backfill, daily | per-day star history by node ID, 256 shards by the first two hex digits of SHA-1(node ID): `{node_id: {start, days, through, anchor_at, anchor_stars, pages, has_more}}` (below). |
 | `windows/latest.json` | daily, **not committed** | the page-ready file (below). Written by the capture into its working copy and listed in the branch's `.gitignore` (`/windows/`); the publisher rebuilds it from a checkout of the branch with `python3 scripts/build_windows.py --data-dir <checkout>` (same bytes as the capture's). There is no daily copy: a past day's page is that day's snapshot plus the history shards. |
-| `diagnostics/YYYY/YYYY-MM-DD.json` | daily | the run's diagnostic: snapshot read/missing/points, discovery status and slices, entrants, coverage, the per-window sources, exit code. |
+| `diagnostics/YYYY/YYYY-MM-DD.json` | daily | the run's diagnostic: snapshot read/missing/points, discovery status and slices, entrants, coverage, `counts` (known/new repos read, carried from an earlier run that day, unread after a retry, inaccessible), `history` (queue, read, failed, deferred, pending after), `completeness` (below), the per-window sources, exit code. |
 
 Every write is atomic (temporary file + rename), so a killed run leaves whole files only.
 
@@ -60,10 +63,12 @@ false (measured exact on 44 of 50 real repos, within 1 star on the other 6).
   "first_snapshot_date": "2026-10-29",
   "windows": [
     {"days": 1, "column": "gain_1d", "source": "history", "exact_since": "2026-10-30", "baseline_date": null,
-     "rows_snapshot": 0, "rows_history": 33790, "rows_null": 11},
+     "rows_snapshot": 0, "rows_history": 33790, "rows_null": 11, "rows_pending": 0},
     {"days": 7, "column": "gain_7d", "source": "history", "exact_since": "2026-11-05", "baseline_date": null, "...": "..."},
     {"days": 15, "...": "..."}, {"days": 30, "...": "..."}, {"days": 90, "...": "..."}, {"days": 180, "...": "..."}, {"days": 365, "...": "..."}
   ],
+  "history": {"pending_rows": 0, "rows_with_history": 33790},
+  "capture": {"status": "complete", "reasons": [], "rows": 33801, "search_total": 33805, "...": "..."},
   "columns": {
     "node_id":    ["R_kgDOxxx", "..."],
     "full_name":  ["owner/name", "..."],
@@ -71,13 +76,15 @@ false (measured exact on 44 of 50 real repos, within 1 star on the other 6).
     "created_at": ["2024-05-01T12:00:00Z", "..."],
     "stars":      [404185, "..."],
     "gain_1d":    [5120, "..."],  "gain_7d": ["..."], "gain_15d": ["..."], "gain_30d": ["..."], "gain_90d": ["..."], "gain_180d": ["..."], "gain_365d": ["..."],
-    "history_mask": [0, 127, "..."]
+    "history_mask": [0, 127, "..."],
+    "history_pending": [0, 0, "..."]
   }
 }
 ```
 
 - **Columnar**: every array in `columns` has `row_count` entries; row *i* is one repo. Rows are the known repos whose count
-  on `date` is above `threshold`, sorted by `stars` descending. A repo whose count could not be read that day is absent.
+  on `date` is above `threshold`, sorted by `stars` descending. A repo whose count could not be read that day is absent
+  (and the capture's `completeness` says so; the publication refuses such a day).
 - **A gain over N days is the stars gained in the N × 24 hours ending at the capture** (`generated_at`), per row:
   - `source: snapshot`: today's count minus the count in the snapshot dated `date - N` (`baseline_date`), which the UTC
     cron captured N × 24 h earlier. Exact net change, unstars included. If that day's run failed, no older snapshot stands
@@ -96,6 +103,12 @@ false (measured exact on 44 of 50 real repos, within 1 star on the other 6).
   - History-sourced cells satisfy 0 ≤ `gain_1d` ≤ `gain_7d` ≤ … ≤ `gain_365d` ≤ `stars`; snapshot-sourced cells may be
     negative (unstars) and are never above `stars`.
     `rows_snapshot`, `rows_history` and `rows_null` per window count these.
+- `history_pending` (0/1 per row) is 1 when the repo is queued in `history-pending.json` and has no history record: its
+  nulls are pending history, counted per window in `rows_pending`, and the publish gate's 1% null rule counts only the other
+  rows. `history` = `{pending_rows, rows_with_history}`.
+- `capture` is that day's `completeness` from the diagnostic: `{status: complete|partial, reasons, rows, search_total,
+  total_count_source, coverage, discovery, known_unread, entrants_unread, inaccessible}`; null for a day captured before it
+  existed. `scripts/build_windows.py` reads it and the queue from the committed files, so the rebuild equals the capture's file.
 - `node_id` is GitHub's GraphQL node ID: stable across renames (`full_name` follows the rename).
 - `language` is the primary language or null; `created_at` is GitHub's ISO instant.
 
@@ -115,5 +128,7 @@ false (measured exact on 44 of 50 real repos, within 1 star on the other 6).
 | backfill (once, on the Mac): 2 pages × ~34k repos, ≤ 3,000 core/h, plus 1 anchor point per 100 repos | ~66k core + ~340 points | ~22 h, resumable (200 repos: 391 requests in 1.9 min) |
 
 `GITHUB_TOKEN` allows 1,000 core requests and 1,000 GraphQL points an hour per repository, and 30 search requests a minute;
-the daily run stays inside all three. Discovery stops at its deadline (75 min in the workflow) and reports which slices it
+the daily run stays inside all three. At the 1,000-star set (66,915 repos on 2026-10-31) the snapshot is ~670 queries (~670
+points, 1 per 100 repos) and day one adds ~330 for the ~32,700 new repos' first counts: ~1,000 points spread over a run of more
+than an hour, so the client waits out a primary limit if it is reached. Core requests stay under 900 an hour (`--core-per-hour`). Discovery stops at its deadline (75 min in the workflow) and reports which slices it
 listed, failed or skipped; the snapshot of the known set never waits for it.

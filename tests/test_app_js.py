@@ -75,5 +75,14 @@ class AppJsTests(unittest.TestCase):
   self.assertEqual(run(f"""console.log(JSON.stringify([app.windowNote({json.dumps(w())},'2026-11-04'),app.windowNote({json.dumps(w())},'2026-11-05'),app.windowNote({json.dumps(w(column='gain_1d',days=1,exact_since='2026-10-30'))},'2026-11-01'),
    app.windowNote({json.dumps(w(source='snapshot',baseline_date='2026-10-30'))},'2026-11-06'),app.windowNote({json.dumps(w(exact_since=None))},'2026-11-06')]))"""),
    [None,'Not available today: the capture 7 days ago was missed','Not available today: the capture 1 day ago was missed',None,None])
+ def test_pending_history_rows_and_the_capture_status_line(self):
+  fixture=json.loads((ROOT/'tests/fixtures/windows-sample.json').read_text());columns={k:v for k,v in fixture['columns'].items() if k!='node_id'}
+  columns['history_pending']=[1,1]+[0]*198
+  page=dict(fixture,schema='star-growth-dashboard/page/1',threshold=999,min_stars=1000,columns=columns,capture={'status':'partial','reasons':['discovery partial'],'rows':66900,'search_total':66915})
+  out=run(f"""const d=app.parseData({json.dumps(page)});const old=app.parseData({json.dumps(dict(page,columns={k:v for k,v in columns.items() if k!='history_pending'},capture=None,min_stars=None))});
+   console.log(JSON.stringify([d.pending,d.rows[0].pending,d.rows[2].pending,d.min_stars,app.captureNote(d),old.pending,old.min_stars,app.captureNote(old),
+   app.captureNote(app.parseData({json.dumps(dict(page,capture={'status':'complete','reasons':[],'rows':66914,'search_total':66915}))})),app.PENDING]))""")
+  self.assertEqual(out,[2,True,False,1000,'Capture partial: discovery partial · 66,900 rows vs GitHub search total 66,915 · history pending for 2 recently added repositories (read a few hundred a day; their unknown gains show "pending").',
+   0,1000,None,'Capture complete: every discovery slice listed and every count read · 66,914 rows vs GitHub search total 66,915 · history pending for 2 recently added repositories (read a few hundred a day; their unknown gains show "pending").','pending'])
  def test_the_app_names_its_data_file_and_columns(self):
   self.assertEqual(run('console.log(JSON.stringify([app.DATA_FILE,app.DATA_SCHEMA,app.GAIN_COLUMNS,app.COLUMNS.map(c=>c[0])]))'),['data.json','star-growth-dashboard/page/1',app_gains(),['full_name','language','created_at','stars',*app_gains()]])

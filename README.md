@@ -1,12 +1,59 @@
 # Star growth dashboard
 
-Every public GitHub repository above 2,000 stars, forks included, with the stars it gained over the past 1, 7, 15, 30,
-90, 180 and 365 days, as a static site on GitHub Pages: **https://neo-giga.github.io/star-growth-dashboard/**. No server,
-no login, no tracking: the browser loads one columnar file and sorts, searches and filters it locally.
-Agents start at the live catalog, [`api/v2/catalog.json`](https://neo-giga.github.io/star-growth-dashboard/api/v2/catalog.json),
-or [`llms.txt`](llms.txt); the contract is [docs/agent-feed.md](docs/agent-feed.md).
+**Find the projects that are accelerating across the whole tracked set of public GitHub repositories, not only inspect a
+project you already know.** Every public repository with at least 1,000 stars, forks included, sits in one table with the
+stars it gained over the past 1, 7, 15, 30, 90, 180 and 365 days: sort by any window to see what is taking off this week
+or this year, search by name, filter by language. Live at **https://neo-giga.github.io/star-growth-dashboard/**; agents
+start at the catalog, [`api/v2/catalog.json`](https://neo-giga.github.io/star-growth-dashboard/api/v2/catalog.json), or
+[`llms.txt`](llms.txt) (contract: [docs/agent-feed.md](docs/agent-feed.md)).
 
-## What is live
+## Why it exists and when to use it
+
+- **One fixed, uniform cohort.** Every repository that meets the star bar is in the set, and the same rows appear in all
+  seven windows, so a ranking is a ranking of the whole cohort rather than of the repositories someone thought to look up.
+- **Daily retained snapshots.** A scheduled capture records every repository's star count once a day on the `data`
+  branch and keeps it; gains become exact differences of two of those counts as the snapshots accumulate.
+- **A machine-readable bulk feed.** The full set as JSONL, CSV and a columnar file, plus top-100 files per window, for
+  scripts and agents.
+- **Explicit provenance.** Each capture says how complete it was (discovery, unread counts, the search total), each gain
+  says whether it came from snapshots (exact) or from GitHub's star history (approximate), and repositories whose history
+  is not read yet are marked pending instead of hidden or zeroed.
+
+Use it to scout what is gaining momentum in a period, to scan a language for fast risers, or to pull a dated cohort for an
+analysis. Use a per-repository tool when you already know which projects you care about.
+
+## How this differs from existing solutions
+
+[Star History](https://www.star-history.com/) is the best-known example and does a lot already: per-repository star
+history charts with several repositories in one chart, an "Align timeline" option and live README embeds
+([how to use it](https://www.star-history.com/blog/how-to-use-github-star-history)), a weekly and all-time ranking on its
+home page, a curated [Star Map](https://www.star-history.com/starmap) and [Star Compare](https://www.star-history.com/compare)
+(side-by-side comparisons across 42 categories). Both projects read GitHub's star history endpoint
+(`/repos/{owner}/{repo}/stargazers/history`; Star History describes its move to it in
+[its 2026-09-05 post](https://www.star-history.com/blog/new-github-star-history-api)), so neither has exclusive or more
+accurate data. The difference is focus: this repository is systematic monitoring of one fixed universe, with daily
+snapshots saved for reproducibility, seven sortable windows over every row and a bulk feed. Star History is better for an
+individual repository's curve, visual comparison and embeds; use the two together (open a repository you found here in
+Star History to see its curve). This project does not draw charts and does not plan to.
+
+## Limits
+
+- **Not every GitHub repository**: public repositories at or over the star bar, as far as GitHub search lists them at
+  capture time. The search index moves during a capture, so a row count close to the search total is reported as such,
+  not as a census.
+- **Not real time**: one capture a day (05:30 UTC, often started late by GitHub's queue); the page shows its capture time.
+- **Approximate until exact baselines exist**: a window's gains come from GitHub's star history (marked ≈; stars given and
+  later removed are not counted) until a daily snapshot N days old exists for that repository.
+- **Pending history**: repositories that joined recently show their current stars and metadata at once; gains no snapshot
+  covers yet read `pending` until their history is read (a few hundred repositories a day, oldest first).
+- Unknown languages, dates and gains are allowed and shown as unknown (`null`), never as zero.
+
+## What is live, and what is new
+
+The live page was built for the set above 2,000 stars (34,231 rows at the 2026-10-31 capture, every gain measured). The
+`>= 1,000` set (66,915 repositories in GitHub search on 2026-10-31) takes over from the first capture published after this
+change ships; its ~32,700 new rows start with pending history, read gradually by the daily capture. The live catalog's
+`min_stars`, `capture` and `history` fields say which set is served and how far its history has come.
 
 - **The page** (`index.html`, `app.js`, `style.css`): one table with a column per window, sortable by any column
   (repository, language, creation date, stars or any gain), name search, language filter, 50-row pages, and a card layout on
@@ -15,8 +62,8 @@ or [`llms.txt`](llms.txt); the contract is [docs/agent-feed.md](docs/agent-feed.
 - **The agent feed** (`api/v2`, schema `2.0`): a catalog pointing at one content-addressed snapshot with top-100 files per
   window (JSON and Markdown), the full set as JSONL and CSV, the page's columnar file, a schema and a manifest. These files
   are generated at publish time and exist only on the live site, not in git.
-- **Daily star capture** records the star count of every repository above the threshold on the orphan `data` branch, every
-  day, kept forever; **Publish the page** rebuilds and deploys the site from it after each capture.
+- **Daily star capture** records the star count of every repository over the threshold (`--threshold 999`: at least 1,000
+  stars) on the orphan `data` branch, every day, kept forever, and reads at most 400 missing histories a day; **Publish the page** rebuilds and deploys the site from it after each capture.
 
 Read the current date, row count and per-window sources from the live catalog rather than from this file. At the first v3
 deploy (capture of 2026-10-31) it listed 34,219 repositories (99.997% of the search total), the 1-day column exact from
@@ -46,7 +93,7 @@ feed is no longer published.
 | triggers | `30 5 * * *` (05:30 UTC, clear of Pacific midnight, the snapshot's date); manual dispatch | every completed *Daily star capture* run on `main`; push to `main` touching `index.html`, `app.js`, `style.css`, `llms.txt`, `docs/agent-feed.md`, `scripts/**`, `publish/**`, `capture/**` or the workflow itself; manual dispatch |
 | writes | one `capture YYYY-MM-DD` commit per day on the `data` branch, as `github-actions[bot]` | the `github-pages` artifact, then Pages. **Nothing is committed to git** |
 | token | built-in `GITHUB_TOKEN` only: `contents: write` on this one job | built-in `GITHUB_TOKEN` only: `contents: read`, `pages: write`, `id-token: write` |
-| job limit | 110 min (`--deadline-minutes 75` for discovery) | 20 min |
+| job limit | 150 min (`--deadline-minutes 75` for discovery; no history batch starts after 110 min) | 20 min |
 | concurrency | `daily-star-capture` | `public-feed-publication` |
 | diagnostic | `capture-diagnostic-<run_id>` artifact, 14 days; also `diagnostics/YYYY/YYYY-MM-DD.json` on `data` | `publish-diagnostic-<run_id>` artifact, 7 days |
 
@@ -56,14 +103,17 @@ publication follows whenever the capture completes.
 
 **Manual runs** (Actions tab, *Run workflow*):
 
-- *Daily star capture*: `threshold` (default `2000`), `skip_discovery` (snapshot the known set only, no search for new
+- *Daily star capture*: `threshold` (default `999`, i.e. at least 1,000 stars; `2000` still means more than 2,000), `skip_discovery` (snapshot the known set only, no search for new
   repositories).
 - *Publish the page*: no inputs; re-publishes the `data` branch's latest capture with the current `main` UI.
 
 ### The publish gate
 
 `scripts/publish_page.py` (rules in `publish/stage.py`) refuses, and the current page stays, when the windows file is older
-than 36 hours, its row count is under 99% of that day's search total, or any gain column is null for more than 1% of rows.
+than 36 hours, its row count is under 99% of that day's search total, the capture left a count batch unread (known or new
+repositories), or any gain column is null for more than 1% of the rows whose history is not pending. Pending means the
+repository entered the set without history and is queued in `history-pending.json`; a repository whose history record went
+missing is never pending, so its nulls still count.
 The one exception: when a missed capture leaves a window without its baseline snapshot on or after its `exact_since`, that
 day's column is exempt from the null rule and the page notes it. The workflow never passes `--ignore-gate`; it is for local
 previews only. A run also stops before deploying, red at *Refuse to deploy a stale run*, when live `main`'s UI or scripts no
@@ -75,6 +125,11 @@ longer match the run's: the run the newer sources triggered publishes instead.
   is the exact net change between two daily counts (`snapshot`, unstars included); until then it comes from GitHub's per-day
   star history (`history`, approximate: stars given and later removed are not counted). Each window's `exact_since` in the
   catalog is the day its column switches to snapshots; the 365-day column switches on 2027-10-29.
+- **Pending history is shown, not hidden.** A repository that joined without history keeps its row in every window with
+  `history_pending` true (`pending` on the page); its gains that no snapshot covers are null until its history is read.
+- **Capture completeness** is recorded per capture (`capture` in the catalog and the page file): `complete` only when every
+  discovery slice was listed, the search total is that day's, no count batch stayed unread and coverage is at least 99%;
+  otherwise `partial` with the reasons. A same-day rerun keeps the earlier run's counts for repositories it cannot read.
 - **Unknown is null, never zero.** Unknown gains, languages and dates are `null` in JSON, empty cells in CSV and `—` on the
   page; they sort last. A repository missing from the set is not known to be deleted.
 - **Dates are US Pacific days**: the 05:30 UTC capture is dated the Pacific day it ends.
@@ -132,7 +187,8 @@ When done with both, remove the `data` checkout: `git worktree remove "$out/data
 - **UI change merged but the page looks old**: only the push paths listed above trigger a publication. Changes to
   `README.md`, `tests/` or other docs trigger nothing.
 - **Capture run red** at *Fail the run when coverage is under the floor*: the day's files were still committed; the snapshot
-  covered under 99% of the search total. `capture-diagnostic-<run_id>` has the slices listed, failed and skipped. If it also
+  covered under 99% of the search total, or a count batch stayed unread after its retries (`counts.known_unread` /
+  `entrants_unread` in the diagnostic). A rerun the same Pacific day reads them again and keeps the counts it already has. `capture-diagnostic-<run_id>` has the slices listed, failed and skipped. If it also
   holds `unpushed-data-commit.patch`, the push to `data` lost a race three times or conflicted: apply the patch by hand.
 - **Checking the data branch**: `git fetch origin data && git log --oneline FETCH_HEAD` shows one `capture YYYY-MM-DD`
   commit per day.
