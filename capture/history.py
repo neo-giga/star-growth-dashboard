@@ -61,7 +61,7 @@ def anchored_reads(gh, batch, read, wall, requests_per_repo=1, max_age=MAX_ANCHO
     def anchor(ids):
         failed = []
         state['at'] = wall()
-        state['rows'], counted = read_counts(gh, ids, workers=1, failed=failed)
+        state['rows'], counted = read_counts(gh, ids, workers=1, failed=failed, stop_on_deadline=True)  # a deadline ends the batch
         state['failed'] = set(failed)
         stats['anchor_points'] = stats.get('anchor_points', 0) + counted['points']
         stats['anchor_queries'] = stats.get('anchor_queries', 0) + counted['queries']

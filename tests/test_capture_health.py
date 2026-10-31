@@ -160,6 +160,40 @@ class HistoryDeadlineTests(Harness):
         self.assertEqual(report['read'] + report['deferred'] + report['incomplete'] + report['unread'], report['selected'])
         self.assertTrue((self.data.root / 'diagnostics/2026/2026-03-10.json').exists())  # and the run still wrote everything
 
+    def test_a_wait_that_would_overshoot_the_deadline_defers_the_batch_untouched(self):
+        self.run_day(0, max_history=0)
+        known = len(self.data.read_repos()['repos'])
+        queue_before = self.data.read_pending()
+        seen = {'graphql': 0, 'history': 0}
+        real = self.fetch
+        def fetch(method, url, body, headers):
+            if url.endswith('/graphql'):
+                seen['graphql'] += 1
+                if seen['graphql'] > -(-known // 100):  # past the count snapshot: the history anchors are rate limited for 15 min
+                    return 403, {'retry-after': '900'}, b'{"message":"You have exceeded a secondary rate limit"}'
+            if '/stargazers/history' in url:
+                seen['history'] += 1
+            return real(method, url, body, headers)
+        self.world.now = START + dt.timedelta(days=1)
+        clock = FakeClock()
+        gh = GitHub('t', fetch=fetch, sleeper=clock.sleep, clock=clock, max_attempts=3, core_per_hour=900)
+        code, diag = daily_capture.run(gh, self.data, 999, now=self.world.now, wall=lambda: self.world.now, log=lambda *_: None,
+                                       max_history=50, skip_discovery=True, history_deadline_minutes=10)  # the 900 s wait would pass the 600 s cutoff
+        report = diag['history']
+        self.assertEqual(diag['snapshot']['failed_queries'], 0)  # the count snapshot ran before any deadline was set
+        self.assertEqual((report['failed'], report['unread'], report['read']), (0, 0, 0))  # not 50 repos yielded as failed anchors
+        self.assertIn('deadline', report.get('stopped', ''))
+        self.assertEqual(report['deferred'], report['selected']); self.assertEqual(report['selected'], 50)
+        self.assertEqual(seen['history'], 0)
+        self.assertEqual(self.data.read_pending(), queue_before)  # no attempts, no last_attempt: every repo keeps its place
+
+    def test_the_count_snapshot_still_treats_a_failed_batch_as_failed(self):
+        from capture.snapshot import read_counts
+        gh = GitHub('t', fetch=lambda *a: (502, {}, b'x'), sleeper=lambda s: None, clock=FakeClock(), max_attempts=2)
+        failed = []
+        rows, stats = read_counts(gh, ['A', 'B'], workers=1, failed=failed)
+        self.assertEqual((rows, stats['failed_queries'], failed), ({}, 1, ['A', 'B']))
+
 
 class GenerationTests(Harness):
     def test_an_interrupted_same_day_rerun_is_never_published_with_the_earlier_diagnostic(self):
