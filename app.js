@@ -1,9 +1,17 @@
-/* Static star-growth explorer. Each window's rows load from their own data file when first selected; repository details come live from the unauthenticated GitHub API. */
+/* Static star-growth explorer: every repository above the threshold in one table, sortable by any column; repository details come live from the unauthenticated GitHub API. */
 'use strict';
 const PAGE_SIZE = 50;
-const DAYS = {day: 1, week: 7, month: 30};
-const DATA_FILES = {day: 'data-day.json', week: 'data-week.json', month: 'data-month.json'};
+const DATA_FILE = 'data.json';
+const DATA_SCHEMA = 'star-growth-dashboard/page/1';
 const UNKNOWN = '—';
+const DEFAULT_SORT = 'gain_7d';
+/* Sortable columns in table order: key, header label, kind (text columns sort ascending on the first click, numbers descending). */
+const COLUMNS = [
+  ['full_name', 'Repository', 'text'], ['language', 'Language', 'text'], ['created_at', 'Created', 'time'], ['stars', 'Stars', 'number'],
+  ['gain_1d', '1 day', 'gain'], ['gain_7d', '1 week', 'gain'], ['gain_15d', '15 days', 'gain'], ['gain_30d', '1 month', 'gain'],
+  ['gain_90d', '3 months', 'gain'], ['gain_180d', '6 months', 'gain'], ['gain_365d', '1 year', 'gain']
+];
+const GAIN_COLUMNS = COLUMNS.filter(([, , kind]) => kind === 'gain').map(([key]) => key);
 const GITHUB_COUNTS = [
   ['contributors', 'Contributors', 'contributors?per_page=1&anon=true'],
   ['issue_comments', 'Issue comments', 'issues/comments?per_page=1'],
@@ -26,19 +34,6 @@ function creationLabel(value) {
   const instant = creationTime(value);
   return instant === null ? UNKNOWN : new Date(instant).toLocaleDateString('en-US', {month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC'});
 }
-function selectRows(rows, {sort = 'gain', search = '', language = ''} = {}) {
-  const query = search.trim().toLowerCase();
-  return rows.filter(row => (!language || (row.language || UNKNOWN) === language) &&
-    (!query || `${row.full_name || ''} ${row.description || ''}`.toLowerCase().includes(query)))
-    .slice().sort((a, b) => {
-      const metric = sort === 'created_at' ? creationTime : numeric;
-      const av = metric(a[sort]), bv = metric(b[sort]);
-      if (av === null && bv !== null) return 1;
-      if (bv === null && av !== null) return -1;
-      if (av !== bv) return bv - av;
-      return (numeric(b.stars) ?? -1) - (numeric(a.stars) ?? -1) || String(a.full_name).localeCompare(String(b.full_name));
-    });
-}
 function repoURL(name) {
   return typeof name === 'string' && /^[\w.-]+\/[\w.-]+$/.test(name) ? `https://github.com/${name}` : null;
 }
@@ -53,6 +48,56 @@ function timeLabel(value) {
 function clockLabel(value) {
   const instant = typeof value === 'number' ? value : Date.parse(value);
   return Number.isFinite(instant) ? new Date(instant).toISOString().slice(11, 16) + ' UTC' : UNKNOWN;
+}
+/* The columnar page file as rows: {rows, windows, generated_at, date, threshold, row_count}, or an Error. Each row carries its search key
+   (lower-cased name) precomputed; the creation instant is parsed once per row the first time the created column is sorted. */
+function parseData(data) {
+  if (!data || typeof data !== 'object' || data.schema !== DATA_SCHEMA || !data.columns || typeof data.columns !== 'object' || !Array.isArray(data.windows)) throw new Error('The local data file has an invalid format.');
+  const count = numeric(data.row_count), columns = data.columns;
+  const names = ['full_name', 'language', 'created_at', 'stars', ...GAIN_COLUMNS, 'history_mask'];
+  if (count === null || count < 0 || names.some(name => !Array.isArray(columns[name]) || columns[name].length !== count)) throw new Error('The local data file has an invalid format.');
+  const windows = GAIN_COLUMNS.map(key => data.windows.find(w => w && w.column === key) || {column: key, source: null, exact_since: null});
+  const rows = new Array(count);
+  for (let i = 0; i < count; i++) {
+    const row = {full_name: columns.full_name[i], language: columns.language[i], created_at: columns.created_at[i], stars: columns.stars[i], history_mask: numeric(columns.history_mask[i]) || 0};
+    for (const key of GAIN_COLUMNS) row[key] = columns[key][i];
+    row.search = String(row.full_name || '').toLowerCase();
+    rows[i] = row;
+  }
+  return {rows, windows, generated_at: data.generated_at, date: data.date, threshold: numeric(data.threshold), row_count: count};
+}
+function windowTooltip(window) {
+  return `From GitHub's star history; exact daily snapshots from ${window && window.exact_since ? window.exact_since : UNKNOWN}`;
+}
+/* A window whose snapshot ring is deep enough (date on or after exact_since) but read no baseline: the capture N days ago was missed. */
+function windowNote(window, date) {
+  const days = window ? numeric(window.days) : null;
+  if (days === null || window.baseline_date != null || typeof window.exact_since !== 'string' || typeof date !== 'string' || date < window.exact_since) return null;
+  return `Not available today: the capture ${days} day${days === 1 ? '' : 's'} ago was missed`;
+}
+/* A row's value for a sort key: null sorts last in both directions. */
+function sortValue(row, key) {
+  if (key === 'created_at') { if (row.created === undefined) row.created = creationTime(row.created_at); return row.created; }
+  if (key === 'full_name' || key === 'language') return typeof row[key] === 'string' && row[key] ? row[key].toLowerCase() : null;
+  return numeric(row[key]);
+}
+function selectRows(rows, {sort = DEFAULT_SORT, direction = 'desc', search = '', language = ''} = {}) {
+  const query = search.trim().toLowerCase(), sign = direction === 'asc' ? 1 : -1;
+  const kind = (COLUMNS.find(([key]) => key === sort) || [])[2] || 'number';
+  return rows.filter(row => (!language || (row.language || UNKNOWN) === language) && (!query || (row.search || String(row.full_name || '').toLowerCase()).includes(query)))
+    .sort((a, b) => {
+      const av = sortValue(a, sort), bv = sortValue(b, sort);
+      if (av === null && bv !== null) return 1;
+      if (bv === null && av !== null) return -1;
+      if (av !== bv && av !== null) return kind === 'text' ? sign * av.localeCompare(bv) : sign * (av - bv);
+      return (numeric(b.stars) ?? -1) - (numeric(a.stars) ?? -1) || String(a.full_name).localeCompare(String(b.full_name));
+    });
+}
+/* The next sort state after a click on a header: a new column starts descending (text columns ascending), the same column flips. */
+function nextSort(current, key) {
+  const kind = (COLUMNS.find(([k]) => k === key) || [])[2] || 'number';
+  if (current.sort === key) return {sort: key, direction: current.direction === 'desc' ? 'asc' : 'desc'};
+  return {sort: key, direction: kind === 'text' ? 'asc' : 'desc'};
 }
 /* [label, value] pairs for a repository record as returned by GET /repos/{owner}/{repo} (already reduced by repoOutcome); anything else is unknown. */
 function metadataFields(metadata) {
@@ -131,30 +176,10 @@ function createCountLoader(fetcher, storage, now = () => Date.now()) {
     return result;
   };
 }
-/* The feed for one window out of its data file, or an Error. */
-function parseFeed(data, period) {
-  if (!data || !Array.isArray(data.feeds)) throw new Error('The local data file has an invalid format.');
-  const feeds = data.feeds.filter(f => f && f.provider === 'gittrend' && f.period === period && Array.isArray(f.rows));
-  if (feeds.length !== 1) throw new Error(`The local data file does not hold exactly one ${period} feed.`);
-  return feeds[0];
-}
-/* A tab opened before a later deploy asks for a data file that is gone (404): reload index.html once per missing file name, never again
-   for the same name, so a deploy that is itself broken shows the error instead of looping. Needs real sessionStorage to remember. */
-const RELOADED_KEY = 'reloaded-for-missing';
-function reloadOnceFor(session, name) {
-  if (!session) return false;
-  try {
-    const tried = JSON.parse(session.getItem(RELOADED_KEY) || '[]');
-    if (!Array.isArray(tried) || tried.includes(name)) return false;
-    session.setItem(RELOADED_KEY, JSON.stringify([...tried, name].slice(-20)));
-    return JSON.parse(session.getItem(RELOADED_KEY)).includes(name);
-  } catch (_) { return false; }
-}
-if (typeof module !== 'undefined') module.exports = {numeric, creationTime, creationLabel, selectRows, repoURL, displayNumber, timeLabel, clockLabel, metadataFields, linkCount, countOutcome, repoOutcome, countLabel, apiRepoPath, createCountLoader, parseFeed, reloadOnceFor, GITHUB_COUNTS, DATA_FILES};
+if (typeof module !== 'undefined') module.exports = {numeric, creationTime, creationLabel, repoURL, displayNumber, timeLabel, clockLabel, parseData, windowTooltip, windowNote, sortValue, selectRows, nextSort, metadataFields, linkCount, countOutcome, repoOutcome, countLabel, apiRepoPath, createCountLoader, COLUMNS, GAIN_COLUMNS, GITHUB_COUNTS, DATA_FILE, DATA_SCHEMA, DEFAULT_SORT};
 if (typeof document !== 'undefined') {
   const el = id => document.getElementById(id);
-  const loaded = {}, pending = {};
-  let page = 1;
+  let data = null, page = 1, state = {sort: DEFAULT_SORT, direction: 'desc'};
   const session = (() => { try { return window.sessionStorage; } catch (_) { return null; } })();
   const memory = new Map(), storage = session || {getItem: key => memory.get(key) ?? null, setItem: (key, value) => memory.set(key, value)};
   const loadCounts = createCountLoader((...args) => fetch(...args), storage);
@@ -164,15 +189,6 @@ if (typeof document !== 'undefined') {
     if (className) element.className = className;
     return element;
   };
-  function currentFeed() { return loaded[el('period').value]; }
-  function loadPeriod(period) {
-    if (!pending[period]) pending[period] = fetch(DATA_FILES[period], {cache: 'no-store'}).then(response => {
-      if (response.status === 404 && reloadOnceFor(session, DATA_FILES[period])) { location.reload(); return new Promise(() => {}); }
-      if (!response.ok) throw new Error(`Data request failed (${response.status}).`);
-      return response.json();
-    }).then(data => { loaded[period] = parseFeed(data, period); return loaded[period]; }).catch(error => { delete pending[period]; throw error; });
-    return pending[period];
-  }
   function openDetails(panel, row) {
     const list = node('dl', undefined, 'repo-metadata'), note = node('p', 'Loading from GitHub…', 'details-note');
     const cells = {};
@@ -188,54 +204,81 @@ if (typeof document !== 'undefined') {
       else note.textContent = `From the GitHub API, fetched ${clockLabel(result.fetched_at)}`;
     }, () => { for (const key in cells) cells[key].textContent = UNKNOWN; note.textContent = 'GitHub details unavailable.'; });
   }
+  /* Header buttons carry the sort state; a history-sourced window gets its ≈ marker and tooltip once, when the data arrives, or the
+     missed-capture note instead. */
+  function renderHeaders() {
+    for (const button of document.querySelectorAll('th button.sort')) {
+      const key = button.dataset.key, th = button.parentElement, active = key === state.sort;
+      th.setAttribute('aria-sort', active ? (state.direction === 'asc' ? 'ascending' : 'descending') : 'none');
+      th.classList.toggle('sorted', active);
+      const window = data && data.windows.find(w => w.column === key);
+      const note = windowNote(window, data && data.date);
+      if (note && !button.querySelector('.missed')) {
+        const mark = node('span', 'n/a', 'missed'); mark.title = note; mark.setAttribute('aria-hidden', 'true'); button.append(mark, node('span', note, 'sr-only'));
+      } else if (!note && window && window.source === 'history' && !button.querySelector('.approx')) {
+        const mark = node('span', '≈', 'approx'); mark.title = windowTooltip(window); button.append(mark);
+      }
+    }
+    el('sort').value = state.sort; el('direction').value = state.direction;
+  }
   function render() {
-    const feed = currentFeed(), rows = feed ? feed.rows : [];
-    if (!feed && pending[el('period').value]) return;  // the window is still loading: changePeriod shows Loading and renders when its fetch resolves
-    const sorted = selectRows(rows, {sort:el('sort').value, search:el('search').value, language:el('language').value});
+    if (!data) return;
+    const {rows, windows} = data, chosen = GAIN_COLUMNS.includes(state.sort) ? state.sort : DEFAULT_SORT;
+    const sorted = selectRows(rows, {...state, search: el('search').value, language: el('language').value});
     const pages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE)); page = Math.min(page, pages);
     const offset = (page - 1) * PAGE_SIZE, body = el('rows'); body.replaceChildren();
-    el('gain-heading').textContent = `${DAYS[el('period').value]}-day gain`;
-    el('updated').textContent = feed && timeLabel(feed.fetched_at_end) !== UNKNOWN ? `Updated ${timeLabel(feed.fetched_at_end).slice(0, 16)} UTC` : '';
-    el('result-count').textContent = sorted.length === rows.length ? `${rows.length.toLocaleString('en-US')} repositories` : `${sorted.length.toLocaleString('en-US')} of ${rows.length.toLocaleString('en-US')} repositories`;
+    const total = rows.length.toLocaleString('en-US'), threshold = data.threshold === null ? '' : ` above ${data.threshold.toLocaleString('en-US')} stars`;
+    el('result-count').textContent = sorted.length === rows.length ? `${total} repositories${threshold}` : `${sorted.length.toLocaleString('en-US')} of ${total} repositories${threshold}`;
+    el('updated').textContent = timeLabel(data.generated_at) !== UNKNOWN ? `Updated ${timeLabel(data.generated_at).slice(0, 16)} UTC` : '';
+    renderHeaders();
+    const note = windowNote(windows.find(w => w.column === chosen), data.date);  /* cards have no header row to carry it */
+    el('sort-note').textContent = note || ''; el('sort-note').hidden = !note;
     for (const [index, row] of sorted.slice(offset, offset + PAGE_SIZE).entries()) {
       const tr = node('tr'), repo = node('td', undefined, 'repo'), url = repoURL(row.full_name);
       const title = node(url ? 'a' : 'span', row.full_name || UNKNOWN, 'repo-name');
       if (url) { title.href = url; title.target = '_blank'; title.rel = 'noopener noreferrer'; }
-      repo.append(title); if (row.description) repo.append(node('span', String(row.description), 'description'));
+      repo.append(title);
       const details = node('details', undefined, 'repo-details'), panel = node('div', undefined, 'details-panel');
       details.append(node('summary', 'Repository details'), panel);
       let attempted = false;
       details.addEventListener('toggle', () => { if (details.open && !attempted) { attempted = true; openDetails(panel, row); } });
       repo.append(details);
       const language = node('td', row.language || UNKNOWN, 'lang'), created = node('td', creationLabel(row.created_at), 'created');
-      const stars = node('td', displayNumber(row.stars), 'num stars'), gain = node('td', displayNumber(row.gain, true), 'num gain');
+      const stars = node('td', displayNumber(row.stars), 'num stars');
       if (!row.language) language.classList.add('muted');
-      if (creationTime(row.created_at) === null) created.classList.add('muted'); else created.title = `Created ${timeLabel(row.created_at)}`;
+      if (sortValue(row, 'created_at') === null) created.classList.add('muted'); else created.title = `Created ${timeLabel(row.created_at)}`;
       if (numeric(row.stars) === null) stars.classList.add('muted');
-      if (numeric(row.gain) === null) gain.classList.add('muted'); else if (numeric(row.gain) > 0) gain.classList.add('gain-positive');
-      tr.append(node('td', String(offset + index + 1), 'rank'), repo, language, created, stars, gain); body.append(tr);
+      tr.append(node('td', String(offset + index + 1), 'rank'), repo, language, created, stars);
+      for (const [index, key] of GAIN_COLUMNS.entries()) {
+        const value = numeric(row[key]), cell = node('td', displayNumber(value, true), 'num gain');
+        cell.dataset.label = COLUMNS.find(([k]) => k === key)[1];
+        if (value === null) cell.classList.add('muted'); else if (value > 0) cell.classList.add('gain-positive');
+        if (value !== null && (row.history_mask & (1 << index))) { cell.classList.add('approx'); cell.title = windowTooltip(windows[index]); }
+        if (key === chosen) cell.classList.add('chosen');
+        tr.append(cell);
+      }
+      body.append(tr);
     }
-    if (!sorted.length) { const td = node('td', feed ? 'No matches. Try clearing the search or language filter.' : 'No data loaded for this window.', 'empty'); td.colSpan = 6; const tr = node('tr'); tr.append(td); body.append(tr); }
+    if (!sorted.length) { const td = node('td', 'No matches. Try clearing the search or language filter.', 'empty'); td.colSpan = 5 + GAIN_COLUMNS.length; const tr = node('tr'); tr.append(td); body.append(tr); }
     el('previous').disabled = page <= 1; el('next').disabled = page >= pages;
     el('page-label').textContent = `Page ${page} of ${pages}`;
   }
-  function changePeriod() {
-    page = 1; el('error').hidden = true; const period = el('period').value, feed = currentFeed();  // a banner belongs to the window whose load raised it
-    if (!feed) {
-      el('rows').replaceChildren(); el('result-count').textContent = 'Loading…'; el('page-label').textContent = '';
-      loadPeriod(period).then(() => { if (el('period').value === period) changePeriod(); }, error => {
-        if (el('period').value !== period) return;
-        el('error').hidden = false; el('error').textContent = `${error.message} This page must be served over HTTP(S), not opened as a local file.`; render();
-      });
-      return;
-    }
-    const languages = [...new Set(feed.rows.map(r => r.language || UNKNOWN))].sort();
-    el('language').replaceChildren(); const all = node('option', 'All languages'); all.value = ''; el('language').append(all);
+  function setSort(next) { state = next; page = 1; render(); }
+  fetch(DATA_FILE, {cache: 'no-store'}).then(response => {
+    if (!response.ok) throw new Error(`Data request failed (${response.status}).`);
+    return response.json();
+  }).then(payload => {
+    data = parseData(payload);
+    const languages = [...new Set(data.rows.map(r => r.language || UNKNOWN))].sort();
     for (const language of languages) { const option = node('option', language); option.value = language; el('language').append(option); }
     render();
-  }
-  el('period').addEventListener('change', changePeriod);
-  for (const id of ['sort', 'language', 'search']) el(id).addEventListener(id === 'search' ? 'input' : 'change', () => {page = 1; render();});
+  }).catch(error => {
+    el('error').hidden = false; el('error').textContent = `${error.message} This page must be served over HTTP(S), not opened as a local file.`;
+    el('result-count').textContent = 'No data loaded.'; el('page-label').textContent = '';
+  });
+  for (const button of document.querySelectorAll('th button.sort')) button.addEventListener('click', () => setSort(nextSort(state, button.dataset.key)));
+  el('sort').addEventListener('change', () => setSort({sort: el('sort').value, direction: state.direction}));
+  el('direction').addEventListener('change', () => setSort({sort: state.sort, direction: el('direction').value}));
+  for (const id of ['language', 'search']) el(id).addEventListener(id === 'search' ? 'input' : 'change', () => {page = 1; render();});
   for (const [id, delta] of [['previous', -1], ['next', 1]]) el(id).addEventListener('click', () => {page += delta; render();});
-  changePeriod();
 }
