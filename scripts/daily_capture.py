@@ -3,8 +3,8 @@
 Order matters: the snapshot of the known set is written first, discovery (search, best effort, deadline) comes second and never
 blocks it, repos without history (oldest turn first, at most MAX_HISTORY_PER_DAY) get their two history pages, then
 repos.json, the history queue, the windows file and the diagnostic. The threshold is exclusive: --threshold 999 captures every
-repo with at least 1,000 stars. A same-day rerun keeps the earlier run's counts for the repos it could not read. The day's counts live in the snapshot only: repos.json carries no per-day field,
-so it only changes when a repo enters, is renamed or changes language (measured 2026-10-29: a daily `stars` + `last_seen` cost
+repo with at least 1,000 stars. A same-day rerun keeps the earlier run's counts for the repos it could not read.
+The day's counts live in the snapshot only: repos.json carries no per-day field, so it only changes when a repo enters, is renamed or changes language (measured 2026-10-29: a daily `stars` + `last_seen` cost
 4.6 MiB of pack in 14 days, ~120 MiB a year, for data the snapshot already holds). Exit codes:
 0 fine; 3 the files are written but coverage (repos read with stars above the threshold / search total_count) is under
 COVERAGE_FLOOR or a count batch stayed unread after its retries, so the run should go red after committing; 2 nothing usable
