@@ -1,7 +1,9 @@
 {
- "last_total_count": 34232,
- "last_total_count_at": "2026-10-31T19:48:16.596984+00:00",
+ "last_total_count": 66917,
+ "last_total_count_at": "2026-10-31T22:20:29.387350+00:00",
  "last_total_count_source": "search",
  "first_snapshot_date": "2026-10-29",
- "last_capture_date": "2026-10-31"
+ "last_capture_date": "2026-10-31",
+ "last_total_count_threshold": 999,
+ "last_capture_at": "2026-10-31T22:20:29.387350+00:00"
 }
