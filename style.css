@@ -152,7 +152,7 @@ a.repo-name:hover{color:var(--accent-text);text-decoration:underline;text-decora
    column) or the plain Details toggle; open, the description wraps in full above the GitHub facts. */
 .repo-details summary{display:block;width:0;min-width:100%;padding:6px 0;line-height:20px;color:var(--gray-900);font-size:var(--fs-xs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;list-style:none;user-select:none;transition:color 120ms ease}
 .repo-details.described summary{font-size:var(--fs-sm)}
-.repo-details[open] summary{white-space:normal;overflow:visible}
+.repo-details[open] summary{white-space:normal;overflow:visible;overflow-wrap:anywhere}
 .repo-details summary:hover,.repo-details[open] summary{color:var(--accent-text)}
 .repo-details.described[open] summary{color:var(--gray-1000)}  /* the full description reads as text, not as a link */
 .repo-details summary::-webkit-details-marker{display:none}

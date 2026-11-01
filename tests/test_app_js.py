@@ -113,6 +113,8 @@ class AppJsTests(unittest.TestCase):
    [...m.keys()],app.descriptionOf(d,d.rows[0]),app.descriptionOf(d,{{full_name:'x/injection'}}),app.descriptionOf(d,d.rows[1]),app.descriptionOf(app.parseData({json.dumps(page)}),d.rows[0]),
    app.parseDescriptions({json.dumps(dict(doc,schema=2))}),app.parseDescriptions({json.dumps(dict(doc,descriptions=[]))}),app.parseDescriptions(null),app.parseDescriptions('x'),app.DESCRIPTIONS_FILE.source]))""")
   self.assertEqual(out,['descriptions.0123456789abcdef.json',None,None,None,['p0deje/Maccy','x/injection'],'Lightweight clipboard manager for macOS',injection,None,None,None,None,None,None,'^descriptions\\.[0-9a-f]{16}\\.json$'])
+  app_js=(ROOT/'app.js').read_text();self.assertIn('data.descriptions = descriptions; applyDescriptions();',app_js);self.assertNotIn('data.descriptions = descriptions; render();',app_js)  # applied in place: an open or focused panel survives
+  self.assertIn('.repo-details[open] summary{white-space:normal;overflow:visible;overflow-wrap:anywhere}',(ROOT/'style.css').read_text())
 FILTER_ROWS=[{'full_name':'a/old','language':'Rust','created_at':'2014-12-31T23:59:59Z','stars':1000,'gain_7d':50,'history_mask':0},
  {'full_name':'b/new-year','language':'Rust','created_at':'2024-01-01T00:00:00Z','stars':1500,'gain_7d':5,'history_mask':0},
  {'full_name':'c/offset','language':'Go','created_at':'2024-12-31T23:30:00-02:00','stars':1501,'gain_7d':900,'history_mask':0},
