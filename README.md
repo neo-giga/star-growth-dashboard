@@ -89,7 +89,9 @@ after this change ships (more than one day if search is degraded: see *Limits*);
 
 - **The page** (`index.html`, `app.js`, `style.css`), titled Momentum: one table with a column per window, sortable by
   creation date, stars or any gain, name search, language filter, 50-row pages, and a card layout on
-  narrow screens. Gains that came from GitHub's star history rather than two daily snapshots are marked ≈. Expanding a row
+  narrow screens. Gains that came from GitHub's star history rather than two daily snapshots are marked ≈. Under each name, the
+  repository's captured description on one line (from a fingerprinted `descriptions.<hash>.json` the page loads after its first
+  rows, built from the `data` branch's metadata shards; absent until metadata is captured); expanding a row shows it in full and
   fetches live details from the GitHub API (see *Live details and rate limits*).
 - **The agent feed** (`api/v2`, schema `2.0`): a catalog pointing at one content-addressed snapshot with top-100 files per
   window (JSON and Markdown), the full set as JSONL and CSV, the page's columnar file, a schema and a manifest; once the

@@ -1,8 +1,11 @@
-/* Momentum, the static star-growth explorer: every repository with at least min_stars stars in one table, sortable by creation date, stars or any gain window; repository details come live from the unauthenticated GitHub API. */
+/* Momentum, the static star-growth explorer: every repository with at least min_stars stars in one table, sortable by creation date, stars or any gain window; each repository's captured
+   description comes from the descriptions file the data file names, loaded after the first rows render; the other repository details come live from the unauthenticated GitHub API. */
 'use strict';
 const PAGE_SIZE = 50;
 const DATA_FILE = 'data.json';
 const DATA_SCHEMA = 'star-growth-dashboard/page/1';
+const DESCRIPTIONS_SCHEMA = 1;
+const DESCRIPTIONS_FILE = /^descriptions\.[0-9a-f]{16}\.json$/;  /* the fingerprinted name the data file may carry as descriptions_file */
 const UNKNOWN = '—';
 const DEFAULT_SORT = 'gain_7d';
 /* Sortable columns in table order: key, header label, kind. Repository and language are not sortable (see RETIRED_SORTS). */
@@ -69,7 +72,19 @@ function parseData(data) {
   }
   const threshold = numeric(data.threshold), pending = rows.reduce((n, row) => n + (row.pending ? 1 : 0), 0), retrying = rows.reduce((n, row) => n + (row.retrying ? 1 : 0), 0);
   return {rows, windows, generated_at: data.generated_at, date: data.date, threshold, min_stars: numeric(data.min_stars) ?? (threshold === null ? null : threshold + 1), row_count: count,
-    pending, retrying, capture: data.capture && typeof data.capture === 'object' ? data.capture : null};
+    pending, retrying, capture: data.capture && typeof data.capture === 'object' ? data.capture : null,
+    descriptions_file: typeof data.descriptions_file === 'string' && DESCRIPTIONS_FILE.test(data.descriptions_file) ? data.descriptions_file : null, descriptions: null};
+}
+/* The descriptions file ({schema: 1, date, descriptions: {full_name: text}}) as a Map of the non-empty strings, or null when it is not that file:
+   the page then keeps its plain Details toggle on every row. Descriptions are owner-written, untrusted text: rendered as text only. */
+function parseDescriptions(doc) {
+  if (!doc || typeof doc !== 'object' || doc.schema !== DESCRIPTIONS_SCHEMA || !doc.descriptions || typeof doc.descriptions !== 'object' || Array.isArray(doc.descriptions)) return null;
+  const map = new Map();
+  for (const [name, text] of Object.entries(doc.descriptions)) if (typeof text === 'string' && text.trim()) map.set(name, text);
+  return map;
+}
+function descriptionOf(data, row) {
+  return data && data.descriptions instanceof Map && typeof row.full_name === 'string' ? data.descriptions.get(row.full_name) ?? null : null;
 }
 /* One line on how complete the capture is; null when the file says nothing about it. */
 function captureNote(data) {
@@ -302,10 +317,11 @@ function createCountLoader(fetcher, storage, now = () => Date.now()) {
     return result;
   };
 }
-if (typeof module !== 'undefined') module.exports = {captureNote, pendingTitle, pendingNote, RETIRED_SORTS, numeric, utcDay, parseRange, parseCreated, parseStars, formatRange, createdDay, filterRows, pageOf, parseQuery, serializeQuery, invalidNote, keepEarlyEdits, activeFilters, UNKNOWN_LANGUAGE, NO_FILTERS, PAGE_SIZE, creationTime, creationLabel, repoURL, displayNumber, timeLabel, clockLabel, parseData, windowTooltip, windowNote, sortValue, selectRows, nextSort, metadataFields, linkCount, countOutcome, repoOutcome, countLabel, apiRepoPath, createCountLoader, COLUMNS, GAIN_COLUMNS, GITHUB_COUNTS, DATA_FILE, DATA_SCHEMA, DEFAULT_SORT};
+if (typeof module !== 'undefined') module.exports = {captureNote, pendingTitle, pendingNote, RETIRED_SORTS, numeric, parseDescriptions, descriptionOf, DESCRIPTIONS_FILE, utcDay, parseRange, parseCreated, parseStars, formatRange, createdDay, filterRows, pageOf, parseQuery, serializeQuery, invalidNote, keepEarlyEdits, activeFilters, UNKNOWN_LANGUAGE, NO_FILTERS, PAGE_SIZE, creationTime, creationLabel, repoURL, displayNumber, timeLabel, clockLabel, parseData, windowTooltip, windowNote, sortValue, selectRows, nextSort, metadataFields, linkCount, countOutcome, repoOutcome, countLabel, apiRepoPath, createCountLoader, COLUMNS, GAIN_COLUMNS, GITHUB_COUNTS, DATA_FILE, DATA_SCHEMA, DEFAULT_SORT};
 if (typeof document !== 'undefined') {
   const el = id => document.getElementById(id);
   let data = null, page = 1, state = {sort: DEFAULT_SORT, direction: 'desc', ...NO_FILTERS}, linkNote = null, selection = {key: null, rows: []};
+  let shown = [];  /* the rows on screen with their details element, so descriptions arriving later are applied in place */
   const session = (() => { try { return window.sessionStorage; } catch (_) { return null; } })();
   const memory = new Map(), storage = session || {getItem: key => memory.get(key) ?? null, setItem: (key, value) => memory.set(key, value)};
   const loadCounts = createCountLoader((...args) => fetch(...args), storage);
@@ -323,15 +339,16 @@ if (typeof document !== 'undefined') {
     if (className) element.className = className;
     return element;
   };
-  function openDetails(panel, row) {
+  /* The expanded row: the GitHub facts; the Description row is left out when the row already shows its captured description. */
+  function openDetails(panel, row, described) {
     const list = node('dl', undefined, 'repo-metadata'), note = node('p', 'Loading from GitHub…', 'details-note');
     const cells = {};
-    for (const [label] of metadataFields(null)) { cells[label] = node('dd', '…'); list.append(node('dt', label), cells[label]); }
+    for (const [label] of metadataFields(null)) { if (described && label === 'Description') continue; cells[label] = node('dd', '…'); list.append(node('dt', label), cells[label]); }
     for (const [field, label] of GITHUB_COUNTS) { cells[field] = node('dd', '…'); list.append(node('dt', label), cells[field]); }
     panel.append(list, note);
     const show = (field, value) => {
       if (field !== 'repo') { cells[field].textContent = countLabel(value); return; }
-      for (const [label, text] of metadataFields(value === 'unavailable' ? null : value)) cells[label].textContent = text;
+      for (const [label, text] of metadataFields(value === 'unavailable' ? null : value)) if (cells[label]) cells[label].textContent = text;
     };
     loadCounts(row.full_name, show).then(result => {
       if (result.limit) note.textContent = result.limit.reset ? `GitHub limit reached — resets ${clockLabel(result.limit.reset)}` : 'GitHub limit reached — try again later';
@@ -395,7 +412,7 @@ if (typeof document !== 'undefined') {
     const key = JSON.stringify([state.sort, state.direction, state.search.trim().toLowerCase(), state.language, state.created, state.stars]);
     if (selection.key !== key) selection = {key, rows: selectRows(rows, state)};  /* paging reuses the filtered, sorted list */
     const sorted = selection.rows, current = pageOf(sorted, page); page = current.page;
-    const {pages, offset} = current, body = el('rows'); body.replaceChildren();
+    const {pages, offset} = current, body = el('rows'); body.replaceChildren(); shown = [];
     const total = rows.length.toLocaleString('en-US'), threshold = data.min_stars === null ? '' : ` with at least ${data.min_stars.toLocaleString('en-US')} stars`;
     el('result-count').textContent = sorted.length === rows.length ? `${total} repositories${threshold}` : `${sorted.length.toLocaleString('en-US')} of ${total} repositories${threshold}`;
     if (data.min_stars !== null) { el('min-stars').textContent = data.min_stars.toLocaleString('en-US'); document.title = `Momentum · Repositories with at least ${data.min_stars.toLocaleString('en-US')} stars`; }
@@ -410,11 +427,18 @@ if (typeof document !== 'undefined') {
       const title = node(url ? 'a' : 'span', row.full_name || UNKNOWN, 'repo-name');
       if (url) { title.href = url; title.target = '_blank'; title.rel = 'noopener noreferrer'; }
       repo.append(title);
-      const details = node('details', undefined, 'repo-details'), panel = node('div', undefined, 'details-panel');
-      details.append(node('summary', 'Repository details'), panel);
+      /* The summary is the captured description, one line until opened (the full text, then the GitHub facts), or a plain Details toggle. */
+      const details = node('details', undefined, 'repo-details'), panel = node('div', undefined, 'details-panel'), description = descriptionOf(data, row);
+      if (description !== null) details.classList.add('described');
+      const summary = node('summary', description ?? 'Details');
+      /* A described summary is selectable text: a press that moves before release is a drag selecting words, not a click, and leaves the panel as it is (Enter and Space have event.detail 0) */
+      let pressed = null;
+      summary.addEventListener('pointerdown', event => { pressed = [event.clientX, event.clientY]; });
+      summary.addEventListener('click', event => { if (event.detail && pressed && details.classList.contains('described') && Math.hypot(event.clientX - pressed[0], event.clientY - pressed[1]) > 4) event.preventDefault(); pressed = null; });
+      details.append(summary, panel);
       let attempted = false;
-      details.addEventListener('toggle', () => { if (details.open && !attempted) { attempted = true; openDetails(panel, row); } });
-      repo.append(details);
+      details.addEventListener('toggle', () => { if (details.open && !attempted) { attempted = true; openDetails(panel, row, details.classList.contains('described')); } });
+      repo.append(details); shown.push({row, details});
       const language = node('td', row.language || UNKNOWN, 'lang'), created = node('td', creationLabel(row.created_at), 'created');
       const stars = node('td', displayNumber(row.stars), 'num stars');
       if (!row.language) language.classList.add('muted');
@@ -476,10 +500,30 @@ if (typeof document !== 'undefined') {
       const option = node('option', `${language} (${count.toLocaleString('en-US')})`); option.value = language; el('language').append(option);
     }
     loadURL(editedEarly);
+    if (data.descriptions_file) loadDescriptions(data);
   }).catch(error => {
     el('error').hidden = false; el('error').textContent = `${error.message} This page must be served over HTTP(S), not opened as a local file.`;
     el('result-count').textContent = 'No data loaded.'; el('page-label').textContent = '';
   });
+  /* After the first rows are on screen: the descriptions file, then the line under each name on the rows already on screen, applied in
+     place (a Details panel opened or focused meanwhile stays open, focused and loaded); later renders carry it. A missing or malformed
+     file changes nothing (the Details toggles stay); only that data file's own descriptions are applied. */
+  function loadDescriptions(loaded) {
+    fetch(loaded.descriptions_file, {cache: 'no-store'}).then(response => response.ok ? response.json() : null).then(doc => {
+      const descriptions = parseDescriptions(doc);
+      if (descriptions && descriptions.size && data === loaded) { data.descriptions = descriptions; applyDescriptions(); }
+    }).catch(() => {});
+  }
+  /* The line under each name, on the rows already on screen: each row's summary text and class change, nothing is re-created, except that a
+     panel built before the file arrived drops its Description row (the description is now the summary above it). */
+  function applyDescriptions() {
+    for (const {row, details} of shown) {
+      const description = descriptionOf(data, row);
+      if (description === null) continue;
+      details.classList.add('described'); details.querySelector('summary').textContent = description;
+      for (const dt of details.querySelectorAll('.repo-metadata dt')) if (dt.textContent === 'Description') { dt.nextElementSibling.remove(); dt.remove(); }
+    }
+  }
   for (const button of document.querySelectorAll('th button.sort')) button.addEventListener('click', () => setSort(nextSort(state, button.dataset.key)));
   el('sort').addEventListener('change', () => setSort({sort: el('sort').value, direction: state.direction}));
   for (const button of document.querySelectorAll('#direction button')) button.addEventListener('click', () => setSort({sort: state.sort, direction: button.dataset.dir}));

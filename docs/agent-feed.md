@@ -120,7 +120,10 @@ The page and this feed are rebuilt by [`publish-page.yml`](publish-page.yml) (in
 or its scripts, and on demand (Actions → Publish the page → Run workflow). Nothing is committed to git: each run builds the
 whole site as the Pages artifact from the repository's UI sources plus `windows/latest.json`, rebuilt from the `data` branch
 (`scripts/build_windows.py`), and deploys it exactly as staged; a run deploys only while its UI/script sources still match live
-`main`'s. Its job permissions are
+`main`'s. Besides the feed, the page loads its own fingerprinted assets: the columnar page file and, once metadata is captured, the
+descriptions file that file names as `descriptions_file` (`{"schema": 1, "date", "descriptions": {full_name: description}}`, only
+repositories whose last metadata check found a non-empty description), shown as the line under each repository name. Agents read
+descriptions from `metadata.jsonl`, not from that page asset. Its job permissions are
 contents:read, pages:write and id-token:write for this public repository only, using the job's GITHUB_TOKEN. The v1 feed
 (`api/v1`, provider-reported day/week/month lists) is no longer published.
 
