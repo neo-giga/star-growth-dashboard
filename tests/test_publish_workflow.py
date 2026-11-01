@@ -11,7 +11,7 @@ _spec = importlib.util.spec_from_file_location('deploy_paths', ROOT / 'scripts/d
 WORKFLOW = (ROOT / '.github/workflows/publish-page.yml').read_text()
 CAPTURE = (ROOT / '.github/workflows/daily-capture.yml').read_text()
 SITE_FILES = ('index.html', 'app.js', 'style.css', 'llms.txt', '.nojekyll', 'docs/agent-feed.md', 'docs/publish-page.yml', 'scripts/publish_page.py', 'scripts/build_static_release.py',
-              'publish/__init__.py', 'publish/stage.py', 'publish/agent_feed.py', 'scripts/build_windows.py', *(f'capture/{p.name}' for p in sorted((ROOT / 'capture').glob('*.py'))))
+              'publish/__init__.py', 'publish/stage.py', 'publish/agent_feed.py', 'publish/topics.py', 'scripts/build_windows.py', *(f'capture/{p.name}' for p in sorted((ROOT / 'capture').glob('*.py'))))
 
 
 def step_script(name):
