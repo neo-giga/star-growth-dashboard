@@ -139,7 +139,11 @@ td.approx{text-decoration:underline dotted var(--gray-700);text-underline-offset
 td{padding:12px;border-bottom:1px solid var(--gray-300);vertical-align:top;font-size:var(--fs-md)}
 td:first-child{padding-left:16px}td:last-child{padding-right:16px}
 tbody tr:last-child td{border-bottom:0}
-@media(hover:hover){tbody tr:hover td{background:var(--gray-100)}}
+/* Each repository is two table rows styled as one: its row (no bottom border or padding) and the description row under it, whose one cell spans
+   from the Repository column to the table's right edge; hovering either highlights both. */
+tbody tr.repository td{padding-bottom:0;border-bottom:0}
+tbody tr.description td{padding-top:0}
+@media(hover:hover){tbody tr:hover td,tbody tr.repository:hover+tr.description td{background:var(--gray-100)}tbody tr.repository:has(+tr.description:hover) td{background:var(--gray-100)}}
 .rank{color:var(--gray-900);width:56px;font-variant-numeric:tabular-nums}
 .repo-name{font-weight:500;color:var(--gray-1000);text-decoration:none;overflow-wrap:anywhere}
 a.repo-name:hover{color:var(--accent-text);text-decoration:underline;text-decoration-color:color-mix(in srgb,var(--accent-text) 35%,transparent)}
@@ -147,9 +151,9 @@ a.repo-name:hover{color:var(--accent-text);text-decoration:underline;text-decora
 .created{white-space:nowrap;font-variant-numeric:tabular-nums}
 .gain-positive{color:var(--pass)}
 .empty{color:var(--gray-900);text-align:center;padding:40px 16px}
-.repo-details{margin-top:2px;font-size:var(--fs-sm);max-width:560px}
+.repo-details{margin-top:2px;font-size:var(--fs-sm)}
 /* The summary is the row's captured description on one line (ellipsis; width:0 + min-width:100% keeps a long text from widening the
-   column) or the plain Details toggle; open, the description wraps in full above the GitHub facts. */
+   row) or the plain Details toggle; open, the description wraps in full above the GitHub facts, which fill the width four facts to a line. */
 .repo-details summary{display:block;width:0;min-width:100%;padding:6px 0;line-height:20px;color:var(--gray-900);font-size:var(--fs-xs);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;list-style:none;user-select:none;transition:color 120ms ease}
 .repo-details.described summary{font-size:var(--fs-sm);user-select:text}  /* the description can be selected and copied */
 .repo-details[open] summary{white-space:normal;overflow:visible;overflow-wrap:anywhere}
@@ -159,7 +163,7 @@ a.repo-name:hover{color:var(--accent-text);text-decoration:underline;text-decora
 .repo-details summary::before{content:"";display:inline-block;width:6px;height:6px;margin:0 8px 1px 1px;border-right:1.75px solid currentColor;border-bottom:1.75px solid currentColor;transform:rotate(-45deg);transition:transform 160ms var(--ease-out)}
 .repo-details[open] summary::before{transform:rotate(45deg)}
 .details-panel{padding:8px 0 4px}
-.repo-metadata{display:grid;grid-template-columns:minmax(120px,auto) minmax(0,1fr);gap:6px 16px;margin:0}
+.repo-metadata{display:grid;grid-template-columns:repeat(4,minmax(100px,auto) minmax(0,1fr));gap:6px 16px;margin:0}
 .repo-metadata dt{color:var(--gray-900)}.repo-metadata dd{margin:0;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
 .details-note{margin:8px 0 16px;color:var(--gray-900);font-size:var(--fs-xs)}
 .pagination{display:flex;justify-content:center;align-items:center;gap:12px;margin-top:16px;font-size:var(--fs-sm);color:var(--gray-900);font-variant-numeric:tabular-nums}
@@ -189,6 +193,9 @@ table,tbody{display:block}
 tbody tr{display:flex;flex-wrap:wrap;align-items:baseline;gap:2px 8px;padding:12px 16px;border-bottom:1px solid var(--gray-300)}
 tbody tr:last-child{border-bottom:0}
 tbody tr::before{content:"";order:4;flex-basis:100%;height:0}
+tbody tr.repository{padding-bottom:0;border-bottom:0}
+tbody tr.description{display:flow-root;padding-top:0}  /* flow-root keeps the details' top margin inside the row, so the pair stays contiguous */
+tbody tr.description td:first-child{display:none}
 td{display:block;padding:0;border:0}
 td:first-child{padding-left:0}td:last-child{padding-right:0}
 td.repo{display:contents}
@@ -203,7 +210,7 @@ td.gain.chosen::before{content:attr(data-label) " ";color:var(--gray-900);font-w
 .stars{order:7}
 .created::before,.stars::before{content:"· "}
 .stars::after{content:" stars"}
-.repo-details{order:9;flex-basis:100%;max-width:none}
+.repo-metadata{grid-template-columns:minmax(120px,auto) minmax(0,1fr)}
 .repo-details summary{padding:10px 0}
 .empty{display:block}
 .pagination{justify-content:space-between}

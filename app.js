@@ -423,11 +423,12 @@ if (typeof document !== 'undefined') {
     const status = captureNote(data); el('capture-status').textContent = status || ''; el('capture-status').hidden = !status;
     const pending = pendingNote(data); el('pending-note').textContent = pending || ''; el('pending-note').hidden = !pending;
     for (const [index, row] of current.rows.entries()) {
-      const tr = node('tr'), repo = node('td', undefined, 'repo'), url = repoURL(row.full_name);
+      const tr = node('tr', undefined, 'repository'), repo = node('td', undefined, 'repo'), url = repoURL(row.full_name);
       const title = node(url ? 'a' : 'span', row.full_name || UNKNOWN, 'repo-name');
       if (url) { title.href = url; title.target = '_blank'; title.rel = 'noopener noreferrer'; }
       repo.append(title);
-      /* The summary is the captured description, one line until opened (the full text, then the GitHub facts), or a plain Details toggle. */
+      /* The summary is the captured description, one line until opened (the full text, then the GitHub facts), or a plain Details toggle. It sits in
+         a second row under the repository's, in one cell from the Repository column to the table's right edge; the pair is styled as one row. */
       const details = node('details', undefined, 'repo-details'), panel = node('div', undefined, 'details-panel'), description = descriptionOf(data, row);
       if (description !== null) details.classList.add('described');
       const summary = node('summary', description ?? 'Details');
@@ -438,7 +439,9 @@ if (typeof document !== 'undefined') {
       details.append(summary, panel);
       let attempted = false;
       details.addEventListener('toggle', () => { if (details.open && !attempted) { attempted = true; openDetails(panel, row, details.classList.contains('described')); } });
-      repo.append(details); shown.push({row, details});
+      const line = node('tr', undefined, 'description'), span = node('td');
+      line.setAttribute('role', 'presentation');  /* assistive tech counts one row per repository; the description is content under it, not a row of its own */
+      span.colSpan = 4 + GAIN_COLUMNS.length; span.append(details); line.append(node('td'), span); shown.push({row, details});
       const language = node('td', row.language || UNKNOWN, 'lang'), created = node('td', creationLabel(row.created_at), 'created');
       const stars = node('td', displayNumber(row.stars), 'num stars');
       if (!row.language) language.classList.add('muted');
@@ -453,7 +456,7 @@ if (typeof document !== 'undefined') {
         if (key === chosen) cell.classList.add('chosen');
         tr.append(cell);
       }
-      body.append(tr);
+      body.append(tr, line);
     }
     if (!sorted.length) { const td = node('td', 'No repositories match these filters. Remove a filter or clear them all.', 'empty'); td.colSpan = 5 + GAIN_COLUMNS.length; const tr = node('tr'); tr.append(td); body.append(tr); }
     el('previous').disabled = page <= 1; el('next').disabled = page >= pages;
