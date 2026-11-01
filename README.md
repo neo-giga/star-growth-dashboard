@@ -20,8 +20,8 @@ the stars it gained over the past 1, 7, 15, 30, 90, 180 and 365 days, as static 
   capture: the catalog's `metadata` block says how many repositories are covered (`absent` until the first read), and a
   repository whose topics are unknown cannot appear. Membership is the exact GitHub topic, not semantic search.
 
-The webpage, **https://neo-giga.github.io/star-growth-dashboard/**, is a secondary human explorer over the same rows: one
-table sortable by any window, name search, language filter.
+The webpage, **https://neo-giga.github.io/star-growth-dashboard/** (titled Momentum), is a secondary human explorer over the
+same rows: one table sortable by any window, name search, language filter.
 
 ## Why it exists and when to use it
 
@@ -76,7 +76,8 @@ snapshot, as static files. Star History stays complementary for the curve of any
 - **Approximate until exact baselines exist**: a window's gains come from GitHub's star history (marked ≈; stars given and
   later removed are not counted) until a daily snapshot N days old exists for that repository.
 - **Pending history**: repositories that joined recently show their current stars and metadata at once; gains no snapshot
-  covers yet read `pending` until their history is read (a few hundred repositories a day, oldest first).
+  covers yet are `null` (— on the page, with a line above the table counting them) until their history is read (a few hundred
+  repositories a day, oldest first).
 - Unknown languages, dates and gains are allowed and shown as unknown (`null`), never as zero.
 
 ## What is live, and what is new
@@ -86,8 +87,8 @@ The live page was built for the set above 2,000 stars (34,231 rows at the 2026-1
 after this change ships (more than one day if search is degraded: see *Limits*); its ~32,700 new rows start with pending history, read gradually by the daily capture. The live catalog's
 `min_stars`, `capture` and `history` fields say which set is served and how far its history has come.
 
-- **The page** (`index.html`, `app.js`, `style.css`): one table with a column per window, sortable by any column
-  (repository, language, creation date, stars or any gain), name search, language filter, 50-row pages, and a card layout on
+- **The page** (`index.html`, `app.js`, `style.css`), titled Momentum: one table with a column per window, sortable by
+  creation date, stars or any gain, name search, language filter, 50-row pages, and a card layout on
   narrow screens. Gains that came from GitHub's star history rather than two daily snapshots are marked ≈. Expanding a row
   fetches live details from the GitHub API (see *Live details and rate limits*).
 - **The agent feed** (`api/v2`, schema `2.0`): a catalog pointing at one content-addressed snapshot with top-100 files per
@@ -159,7 +160,8 @@ longer match the run's: the run the newer sources triggered publishes instead.
   star history (`history`, approximate: stars given and later removed are not counted). Each window's `exact_since` in the
   catalog is the day its column switches to snapshots; the 365-day column switches on 2027-10-29.
 - **Pending history is shown, not hidden.** A repository that joined without history keeps its row in every window with
-  `history_pending` true (`pending` on the page); its gains that no snapshot covers are null until its history is read.
+  `history_pending` true (— on the page, with a hover text saying the gain arrives once its history is read); its gains that no
+  snapshot covers are null until its history is read.
 - **Capture completeness** is recorded per capture (`capture` in the catalog and the page file): `complete` only when every
   discovery slice was listed, the search total is that day's, no count batch stayed unread and coverage is at least 99%;
   otherwise `partial` with the reasons. A same-day rerun keeps the earlier run's counts for repositories it cannot read.
