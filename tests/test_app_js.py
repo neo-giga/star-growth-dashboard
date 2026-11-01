@@ -136,6 +136,7 @@ class FilterTests(unittest.TestCase):
  def test_edits_made_while_the_data_loads_override_the_link_except_its_language(self):
   out=run('''const fromURL=app.parseQuery("?q=old&language=Rust&created=2024-01-01..2024-12-31&stars=%3E=5000&sort=stars&dir=asc&page=4").state;
    const edits={...fromURL,search:'react',language:'',created:{after:null,before:'2019-12-31'},stars:{min:2000,max:null},sort:'gain_30d',direction:'desc'};
-   const kept=app.keepEarlyEdits(fromURL,edits);console.log(JSON.stringify([kept,app.serializeQuery(kept)]))''')
+   const kept=app.keepEarlyEdits(fromURL,edits),untouched=app.keepEarlyEdits(fromURL,{...fromURL,language:'',created:{...fromURL.created},stars:{...fromURL.stars}});
+   console.log(JSON.stringify([kept,app.serializeQuery(kept),untouched===fromURL,untouched.page,app.keepEarlyEdits(fromURL,{...fromURL,direction:'desc'}).page]))''')
   self.assertEqual(out,[{'search':'react','language':'Rust','created':{'after':None,'before':'2019-12-31'},'stars':{'min':2000,'max':None},'sort':'gain_30d','direction':'desc','page':1},
-   '?q=react&language=Rust&created=%3C=2019-12-31&stars=%3E=2000&sort=gain_30d'])
+   '?q=react&language=Rust&created=%3C=2019-12-31&stars=%3E=2000&sort=gain_30d',True,4,1])  # focus without a change keeps the link's page

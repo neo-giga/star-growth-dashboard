@@ -180,9 +180,13 @@ function invalidNote(invalid) {
   if (!invalid.length) return null;
   return `Ignored from this link: ${invalid.map(([key, value, help]) => `${key}=${value} (expected ${help})`).join('; ')}. The other filters still apply.`;
 }
-/* The first render's state when the visitor edited the form while the data loaded: the link's state (its language included: none can be
-   chosen before the options exist) with the visitor's search, created, stars, sort and order, from page 1. */
+/* The first render's state when the visitor touched the form while the data loaded: the link's state itself (page included) when search,
+   created, stars, sort and order are unchanged; otherwise the link's state (its language included: none can be chosen before the options
+   exist) with the visitor's values, from page 1. */
 function keepEarlyEdits(fromURL, edits) {
+  const range = (bounds, low, high) => formatRange(bounds[low], bounds[high]);
+  if (edits.search === fromURL.search && range(edits.created, 'after', 'before') === range(fromURL.created, 'after', 'before') && range(edits.stars, 'min', 'max') === range(fromURL.stars, 'min', 'max') &&
+    edits.sort === fromURL.sort && edits.direction === fromURL.direction) return fromURL;
   return {...fromURL, search: edits.search, created: edits.created, stars: edits.stars, sort: edits.sort, direction: edits.direction, page: 1};
 }
 /* Active filters as [key, qualifier text] pairs, in the URL's order; the chips render these. */
@@ -446,7 +450,7 @@ if (typeof document !== 'undefined') {
     if (parsed.language && ![...el('language').options].some(option => option.value === parsed.language)) { invalid.push(['language', parsed.language, QUERY_HELP.language]); parsed.language = ''; }
     page = parsed.page; delete parsed.page; state = parsed; linkNote = invalidNote(invalid);
     writeControls(); renderNotes(edits && edits.note); render();
-    if (edits) writeURL(false);
+    if (edits && parsed !== fromURL) writeURL(false);  /* only a real change rewrites the link */
   }
   const debounce = (fn, ms) => { let timer = null; return () => { clearTimeout(timer); timer = setTimeout(fn, ms); }; };
   /* Until the data arrives the form shows the link's state; an edit made meanwhile is kept and applied on load, not replaced by the URL. */
