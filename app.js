@@ -430,6 +430,7 @@ if (typeof document !== 'undefined') {
       /* The summary is the captured description, one line until opened (the full text, then the GitHub facts), or a plain Details toggle. It sits in
          a second row under the repository's, in one cell from the Repository column to the table's right edge; the pair is styled as one row. */
       const details = node('details', undefined, 'repo-details'), panel = node('div', undefined, 'details-panel'), description = descriptionOf(data, row);
+      details.id = `repo-details-${offset + index + 1}`; repo.setAttribute('aria-owns', details.id);  /* for assistive tech the toggle belongs to this Repository cell, though it is laid out in the row below */
       if (description !== null) details.classList.add('described');
       const summary = node('summary', description ?? 'Details');
       /* A described summary is selectable text: a press that moves before release is a drag selecting words, not a click, and leaves the panel as it is (Enter and Space have event.detail 0) */

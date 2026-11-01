@@ -122,6 +122,7 @@ class AppJsTests(unittest.TestCase):
   self.assertIn("const tr = node('tr', undefined, 'repository')",app_js);self.assertIn("const line = node('tr', undefined, 'description'), span = node('td');",app_js)
   self.assertIn("span.colSpan = 4 + GAIN_COLUMNS.length; span.append(details); line.append(node('td'), span);",app_js)  # an empty # cell, then one cell over the other eleven columns
   self.assertIn("line.setAttribute('role', 'presentation');",app_js);self.assertIn('body.append(tr, line);',app_js)
+  self.assertIn("details.id = `repo-details-${offset + index + 1}`; repo.setAttribute('aria-owns', details.id);",app_js)  # the toggle's id is its rank, so the Repository cell owns it for assistive tech and the in-place apply keeps it
   self.assertNotIn('repo.append(details)',app_js);self.assertNotIn('max-width:560px',css)  # the description is no longer confined to the Repository cell
   self.assertIn('tbody tr.repository td{padding-bottom:0;border-bottom:0}',css);self.assertIn('tbody tr.description td{padding-top:0}',css)  # the pair reads as one row
   self.assertIn('tbody tr.repository:hover+tr.description td{background:var(--gray-100)}',css);self.assertIn('tbody tr.repository:has(+tr.description:hover) td{background:var(--gray-100)}',css)
