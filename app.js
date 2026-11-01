@@ -14,9 +14,6 @@ const COLUMNS = [
 /* Sort keys older links may carry (the page once sorted by them): they fall back to the default sort silently, with no "ignored" note. */
 const RETIRED_SORTS = ['full_name', 'language'];
 const GAIN_COLUMNS = COLUMNS.filter(([, , kind]) => kind === 'gain').map(([key]) => key);
-/* A pending gain names the date its window becomes exact for every row when that date is within this many days of the capture; further
-   out, the repository's history read is expected first and no date is promised. */
-const DATED_WITHIN_DAYS = 60;
 const GITHUB_COUNTS = [
   ['contributors', 'Contributors', 'contributors?per_page=1&anon=true'],
   ['issue_comments', 'Issue comments', 'issues/comments?per_page=1'],
@@ -82,32 +79,16 @@ function captureNote(data) {
   if (capture && numeric(capture.search_total) !== null) parts.push(`${displayNumber(capture.rows)} rows vs GitHub search total ${displayNumber(capture.search_total)}`);
   return parts.length ? parts.join(' · ') + '.' : null;
 }
-/* 'Nov 5' (with the year when it differs from the capture's) for the day a pending gain is known at the latest: the window's exact_since,
-   when it is after the capture date and within DATED_WITHIN_DAYS of it; null otherwise (already exact, far out, or unknown). */
-function pendingSince(window, date) {
-  const since = window ? utcDay(window.exact_since) : null, day = utcDay(date);
-  if (since === null || day === null || since <= day || since > shiftDay(day, DATED_WITHIN_DAYS)) return null;
-  return new Date(Date.parse(`${since}T00:00:00Z`)).toLocaleDateString('en-US', {month: 'short', day: 'numeric', timeZone: 'UTC', ...(since.slice(0, 4) === day.slice(0, 4) ? {} : {year: 'numeric'})});
+/* The hover text of a gain shown as — because the repository's history is pending: why, and that the gain arrives once its history is read. */
+function pendingTitle(retrying = false) {
+  const why = retrying ? 'a read of this repository\'s GitHub star history failed or came back incomplete; it is retried in turn' : 'this repository joined recently and its GitHub star history is read gradually';
+  return `Not known yet: ${why}. Its stars are current; this gain appears once its history is read.`;
 }
-/* The hover text of a gain shown as — because the repository's history is pending: why, and when the gain arrives. */
-function pendingTitle(window, date, retrying = false) {
-  const why = retrying ? 'a read of this repository\'s GitHub star history failed or came back incomplete; it is retried in turn' : 'this repository joined recently and its GitHub star history is read gradually, oldest first';
-  const since = pendingSince(window, date);
-  return `Not known yet: ${why}. Its stars are current; this gain appears once its history is read${since ? `, or from ${since} at the latest, when daily snapshots cover the window` : ''}.`;
-}
-/* The line above the table while any row's history is pending: how many rows, and for each window exact within DATED_WITHIN_DAYS the day
-   its column is known for every row; null when nothing is pending. */
+/* The line above the table while any row's history is pending: how many rows, and that their gains appear once their history is read; null when nothing is pending. */
 function pendingNote(data) {
   if (!data || !data.pending) return null;
-  const dated = [], later = [];
-  for (const window of data.windows) {
-    const since = pendingSince(window, data.date), days = numeric(window.days);
-    if (since && days !== null) dated.push(`${days}-day from ${since}`);
-    else if (utcDay(window.exact_since) === null || utcDay(data.date) === null || window.exact_since > data.date) later.push(window);
-  }
   const retried = data.retrying ? ` (${displayNumber(data.retrying)} retried after a failed read)` : '';
-  const when = later.length ? `${dated.length ? '; longer windows' : '; they appear'} as their history is read` : '';
-  return `Gains for ${displayNumber(data.pending)} recently added repositories${retried} aren't known yet${dated.length ? `: ${dated.join(', ')}` : ''}${when}.`;
+  return `Gains for ${displayNumber(data.pending)} recently added repositories${retried} aren't known yet; they appear once their star history is read.`;
 }
 function windowTooltip(window) {
   return `From GitHub's star history; exact daily snapshots from ${window && window.exact_since ? window.exact_since : UNKNOWN}`;
@@ -321,7 +302,7 @@ function createCountLoader(fetcher, storage, now = () => Date.now()) {
     return result;
   };
 }
-if (typeof module !== 'undefined') module.exports = {captureNote, pendingSince, pendingTitle, pendingNote, RETIRED_SORTS, DATED_WITHIN_DAYS, numeric, utcDay, parseRange, parseCreated, parseStars, formatRange, createdDay, filterRows, pageOf, parseQuery, serializeQuery, invalidNote, keepEarlyEdits, activeFilters, UNKNOWN_LANGUAGE, NO_FILTERS, PAGE_SIZE, creationTime, creationLabel, repoURL, displayNumber, timeLabel, clockLabel, parseData, windowTooltip, windowNote, sortValue, selectRows, nextSort, metadataFields, linkCount, countOutcome, repoOutcome, countLabel, apiRepoPath, createCountLoader, COLUMNS, GAIN_COLUMNS, GITHUB_COUNTS, DATA_FILE, DATA_SCHEMA, DEFAULT_SORT};
+if (typeof module !== 'undefined') module.exports = {captureNote, pendingTitle, pendingNote, RETIRED_SORTS, numeric, utcDay, parseRange, parseCreated, parseStars, formatRange, createdDay, filterRows, pageOf, parseQuery, serializeQuery, invalidNote, keepEarlyEdits, activeFilters, UNKNOWN_LANGUAGE, NO_FILTERS, PAGE_SIZE, creationTime, creationLabel, repoURL, displayNumber, timeLabel, clockLabel, parseData, windowTooltip, windowNote, sortValue, selectRows, nextSort, metadataFields, linkCount, countOutcome, repoOutcome, countLabel, apiRepoPath, createCountLoader, COLUMNS, GAIN_COLUMNS, GITHUB_COUNTS, DATA_FILE, DATA_SCHEMA, DEFAULT_SORT};
 if (typeof document !== 'undefined') {
   const el = id => document.getElementById(id);
   let data = null, page = 1, state = {sort: DEFAULT_SORT, direction: 'desc', ...NO_FILTERS}, linkNote = null, selection = {key: null, rows: []};
@@ -443,7 +424,7 @@ if (typeof document !== 'undefined') {
       for (const [index, key] of GAIN_COLUMNS.entries()) {
         const value = numeric(row[key]), cell = node('td', displayNumber(value, true), 'num gain');
         cell.dataset.label = COLUMNS.find(([k]) => k === key)[1];
-        if (value === null) { cell.classList.add('muted'); if (row.pending) { cell.classList.add('pending'); cell.title = pendingTitle(windows[index], data.date, row.retrying); } } else if (value > 0) cell.classList.add('gain-positive');
+        if (value === null) { cell.classList.add('muted'); if (row.pending) { cell.classList.add('pending'); cell.title = pendingTitle(row.retrying); cell.setAttribute('aria-describedby', 'pending-note'); } } else if (value > 0) cell.classList.add('gain-positive');
         if (value !== null && (row.history_mask & (1 << index))) { cell.classList.add('approx'); cell.title = windowTooltip(windows[index]); }
         if (key === chosen) cell.classList.add('chosen');
         tr.append(cell);

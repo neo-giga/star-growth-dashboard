@@ -82,24 +82,19 @@ class AppJsTests(unittest.TestCase):
    [None,'Not available today: the capture 7 days ago was missed','Not available today: the capture 1 day ago was missed',None,None])
  def test_pending_history_rows_the_capture_status_line_and_the_pending_line(self):
   fixture=json.loads((ROOT/'tests/fixtures/windows-sample.json').read_text());columns={k:v for k,v in fixture['columns'].items() if k!='node_id'}
-  columns['history_pending']=[1,2]+[0]*198  # the fixture is dated 2026-10-29: 1d exact from Oct 30, 7d Nov 5, 15d Nov 13, 30d Nov 28, 90d Jan 27 2027 (beyond 60 days)
+  columns['history_pending']=[1,2]+[0]*198
   page=dict(fixture,schema='star-growth-dashboard/page/1',threshold=999,min_stars=1000,columns=columns,capture={'status':'partial','reasons':['discovery partial'],'rows':66900,'search_total':66915})
   out=run(f"""const d=app.parseData({json.dumps(page)});const old=app.parseData({json.dumps(dict(page,columns={k:v for k,v in columns.items() if k!='history_pending'},capture=None,min_stars=None))});
    console.log(JSON.stringify([d.pending,d.retrying,d.rows[0].pending,d.rows[2].pending,d.min_stars,app.captureNote(d),old.pending,old.min_stars,app.captureNote(old),
-   app.captureNote(app.parseData({json.dumps(dict(page,capture={'status':'complete','reasons':[],'rows':66914,'search_total':66915}))})),app.pendingNote(d),app.pendingNote(old),
-   app.pendingNote({{...d,retrying:0,windows:d.windows.slice(1,2)}}),app.pendingNote({{...d,retrying:0,windows:d.windows.slice(4)}}),app.pendingNote({{...d,retrying:0,date:'2026-11-29'}}),app.DATED_WITHIN_DAYS]))""")
+   app.captureNote(app.parseData({json.dumps(dict(page,capture={'status':'complete','reasons':[],'rows':66914,'search_total':66915}))})),app.pendingNote(d),app.pendingNote(old),app.pendingNote({{...d,retrying:0}}),app.pendingNote(null)]))""")
   self.assertEqual(out,[2,1,True,False,1000,'Capture partial: discovery partial · 66,900 rows vs GitHub search total 66,915.',0,1000,None,'Capture complete: every discovery slice listed and every count read · 66,914 rows vs GitHub search total 66,915.',
-   "Gains for 2 recently added repositories (1 retried after a failed read) aren't known yet: 1-day from Oct 30, 7-day from Nov 5, 15-day from Nov 13, 30-day from Nov 28; longer windows as their history is read.",None,
-   "Gains for 2 recently added repositories aren't known yet: 7-day from Nov 5.","Gains for 2 recently added repositories aren't known yet; they appear as their history is read.",
-   "Gains for 2 recently added repositories aren't known yet: 90-day from Jan 27, 2027; longer windows as their history is read.",60])
- def test_a_pending_gain_is_a_muted_dash_whose_title_says_when_it_arrives(self):
-  w=lambda **k:dict({'column':'gain_7d','days':7,'source':'history','exact_since':'2026-11-05'},**k)
-  out=run(f"""console.log(JSON.stringify([app.pendingSince({json.dumps(w())},'2026-11-01'),app.pendingSince({json.dumps(w(exact_since='2027-01-27'))},'2026-11-01'),app.pendingSince({json.dumps(w(exact_since='2026-12-31'))},'2026-11-01'),app.pendingSince({json.dumps(w(exact_since='2027-01-01'))},'2026-11-02'),
-   app.pendingSince({json.dumps(w(exact_since='2026-11-01'))},'2026-11-01'),app.pendingSince({json.dumps(w(exact_since=None))},'2026-11-01'),app.pendingSince({json.dumps(w())},null),app.pendingSince(null,'2026-11-01'),
-   app.pendingTitle({json.dumps(w())},'2026-11-01'),app.pendingTitle({json.dumps(w(exact_since='2027-01-27'))},'2026-11-01',true),app.displayNumber(null,true),app.UNKNOWN_LANGUAGE]))""")
-  self.assertEqual(out,['Nov 5',None,'Dec 31','Jan 1, 2027',None,None,None,None,
-   "Not known yet: this repository joined recently and its GitHub star history is read gradually, oldest first. Its stars are current; this gain appears once its history is read, or from Nov 5 at the latest, when daily snapshots cover the window.",
+   "Gains for 2 recently added repositories (1 retried after a failed read) aren't known yet; they appear once their star history is read.",None,
+   "Gains for 2 recently added repositories aren't known yet; they appear once their star history is read.",None])
+ def test_a_pending_gain_is_a_muted_dash_whose_title_names_no_date_and_points_assistive_tech_at_the_pending_line(self):
+  out=run('console.log(JSON.stringify([app.pendingTitle(),app.pendingTitle(true),app.displayNumber(null,true),app.UNKNOWN_LANGUAGE]))')
+  self.assertEqual(out,["Not known yet: this repository joined recently and its GitHub star history is read gradually. Its stars are current; this gain appears once its history is read.",
    "Not known yet: a read of this repository's GitHub star history failed or came back incomplete; it is retried in turn. Its stars are current; this gain appears once its history is read.",'—','Unknown'])
+  self.assertNotIn('pendingSince',(ROOT/'app.js').read_text());self.assertIn("cell.setAttribute('aria-describedby', 'pending-note')",(ROOT/'app.js').read_text())
  def test_the_page_is_named_momentum_lists_nine_sorts_and_never_says_pending(self):
   html=(ROOT/'index.html').read_text();visible=re.sub(r'<script>.*?</script>','',html,flags=re.S)
   self.assertEqual(re.search(r'<title>([^<]*)</title>',html)[1],'Momentum · GitHub repositories by stars gained');self.assertIn('<span class="brand-name">Momentum</span>',html)

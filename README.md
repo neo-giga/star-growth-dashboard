@@ -76,8 +76,8 @@ snapshot, as static files. Star History stays complementary for the curve of any
 - **Approximate until exact baselines exist**: a window's gains come from GitHub's star history (marked ≈; stars given and
   later removed are not counted) until a daily snapshot N days old exists for that repository.
 - **Pending history**: repositories that joined recently show their current stars and metadata at once; gains no snapshot
-  covers yet are `null` (— on the page, with a line above the table saying when each window arrives) until their history is read
-  (a few hundred repositories a day, oldest first).
+  covers yet are `null` (— on the page, with a line above the table counting them) until their history is read (a few hundred
+  repositories a day, oldest first).
 - Unknown languages, dates and gains are allowed and shown as unknown (`null`), never as zero.
 
 ## What is live, and what is new
@@ -160,8 +160,8 @@ longer match the run's: the run the newer sources triggered publishes instead.
   star history (`history`, approximate: stars given and later removed are not counted). Each window's `exact_since` in the
   catalog is the day its column switches to snapshots; the 365-day column switches on 2027-10-29.
 - **Pending history is shown, not hidden.** A repository that joined without history keeps its row in every window with
-  `history_pending` true (— on the page, with a hover text saying when the gain arrives); its gains that no snapshot covers are
-  null until its history is read.
+  `history_pending` true (— on the page, with a hover text saying the gain arrives once its history is read); its gains that no
+  snapshot covers are null until its history is read.
 - **Capture completeness** is recorded per capture (`capture` in the catalog and the page file): `complete` only when every
   discovery slice was listed, the search total is that day's, no count batch stayed unread and coverage is at least 99%;
   otherwise `partial` with the reasons. A same-day rerun keeps the earlier run's counts for repositories it cannot read.
