@@ -117,6 +117,17 @@ class AppJsTests(unittest.TestCase):
   self.assertIn('.repo-details[open] summary{white-space:normal;overflow:visible;overflow-wrap:anywhere}',(ROOT/'style.css').read_text())
   self.assertIn(".repo-details.described summary{font-size:var(--fs-sm);user-select:text}",(ROOT/'style.css').read_text())  # the description is selectable text; the plain Details toggle stays unselectable
   self.assertIn("if (dt.textContent === 'Description') { dt.nextElementSibling.remove(); dt.remove(); }",app_js)  # a panel built before the file arrived loses its Description row when its line is applied
+ def test_the_description_sits_in_a_second_row_spanning_from_the_repository_column_to_the_table_edge(self):
+  app_js=(ROOT/'app.js').read_text();css=(ROOT/'style.css').read_text()
+  self.assertIn("const tr = node('tr', undefined, 'repository')",app_js);self.assertIn("const line = node('tr', undefined, 'description'), span = node('td');",app_js)
+  self.assertIn("span.colSpan = 4 + GAIN_COLUMNS.length; span.append(details); line.append(node('td'), span);",app_js)  # an empty # cell, then one cell over the other eleven columns
+  self.assertIn("line.setAttribute('role', 'presentation');",app_js);self.assertIn('body.append(tr, line);',app_js)
+  self.assertIn("details.id = `repo-details-${offset + index + 1}`; repo.setAttribute('aria-owns', details.id);",app_js)  # the toggle's id is its rank, so the Repository cell owns it for assistive tech and the in-place apply keeps it
+  self.assertNotIn('repo.append(details)',app_js);self.assertNotIn('max-width:560px',css)  # the description is no longer confined to the Repository cell
+  self.assertIn('tbody tr.repository td{padding-bottom:0;border-bottom:0}',css);self.assertIn('tbody tr.description td{padding-top:0}',css)  # the pair reads as one row
+  self.assertIn('tbody tr.repository:hover+tr.description td{background:var(--gray-100)}',css);self.assertIn('tbody tr.repository:has(+tr.description:hover) td{background:var(--gray-100)}',css)
+  self.assertIn('.repo-metadata{display:grid;grid-template-columns:repeat(4,minmax(100px,auto) minmax(0,1fr));',css)  # the facts panel fills the width
+  self.assertIn('tbody tr.description{display:flow-root;padding-top:0}',css);self.assertIn('tbody tr.description td:first-child{display:none}',css)  # cards: the description keeps the card's full width
 FILTER_ROWS=[{'full_name':'a/old','language':'Rust','created_at':'2014-12-31T23:59:59Z','stars':1000,'gain_7d':50,'history_mask':0},
  {'full_name':'b/new-year','language':'Rust','created_at':'2024-01-01T00:00:00Z','stars':1500,'gain_7d':5,'history_mask':0},
  {'full_name':'c/offset','language':'Go','created_at':'2024-12-31T23:30:00-02:00','stars':1501,'gain_7d':900,'history_mask':0},
