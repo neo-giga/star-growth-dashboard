@@ -1,20 +1,22 @@
-/* Static star-growth explorer: every repository with at least min_stars stars in one table, sortable by any column; repository details come live from the unauthenticated GitHub API. */
+/* Momentum, the static star-growth explorer: every repository with at least min_stars stars in one table, sortable by creation date, stars or any gain window; repository details come live from the unauthenticated GitHub API. */
 'use strict';
 const PAGE_SIZE = 50;
 const DATA_FILE = 'data.json';
 const DATA_SCHEMA = 'star-growth-dashboard/page/1';
 const UNKNOWN = '—';
-const PENDING = 'pending';
-const PENDING_TITLE = 'History pending: this repository joined recently and its GitHub star history is read gradually, oldest first. Its stars are current; this gain appears once its history or enough daily snapshots exist.';
-const RETRYING_TITLE = 'History pending: a read of this repository\'s GitHub star history failed or came back incomplete; it is retried in turn. Its stars are current.';
 const DEFAULT_SORT = 'gain_7d';
-/* Sortable columns in table order: key, header label, kind (text columns sort ascending on the first click, numbers descending). */
+/* Sortable columns in table order: key, header label, kind. Repository and language are not sortable (see RETIRED_SORTS). */
 const COLUMNS = [
-  ['full_name', 'Repository', 'text'], ['language', 'Language', 'text'], ['created_at', 'Created', 'time'], ['stars', 'Stars', 'number'],
+  ['created_at', 'Created', 'time'], ['stars', 'Stars', 'number'],
   ['gain_1d', '1 day', 'gain'], ['gain_7d', '1 week', 'gain'], ['gain_15d', '15 days', 'gain'], ['gain_30d', '1 month', 'gain'],
   ['gain_90d', '3 months', 'gain'], ['gain_180d', '6 months', 'gain'], ['gain_365d', '1 year', 'gain']
 ];
+/* Sort keys older links may carry (the page once sorted by them): they fall back to the default sort silently, with no "ignored" note. */
+const RETIRED_SORTS = ['full_name', 'language'];
 const GAIN_COLUMNS = COLUMNS.filter(([, , kind]) => kind === 'gain').map(([key]) => key);
+/* A pending gain names the date its window becomes exact for every row when that date is within this many days of the capture; further
+   out, the repository's history read is expected first and no date is promised. */
+const DATED_WITHIN_DAYS = 60;
 const GITHUB_COUNTS = [
   ['contributors', 'Contributors', 'contributors?per_page=1&anon=true'],
   ['issue_comments', 'Issue comments', 'issues/comments?per_page=1'],
@@ -72,14 +74,40 @@ function parseData(data) {
   return {rows, windows, generated_at: data.generated_at, date: data.date, threshold, min_stars: numeric(data.min_stars) ?? (threshold === null ? null : threshold + 1), row_count: count,
     pending, retrying, capture: data.capture && typeof data.capture === 'object' ? data.capture : null};
 }
-/* One line on how complete the capture is and how much history is still pending; null when the file says nothing about either. */
+/* One line on how complete the capture is; null when the file says nothing about it. */
 function captureNote(data) {
   const parts = [], capture = data && data.capture;
   if (capture && capture.status === 'complete') parts.push('Capture complete: every discovery slice listed and every count read');
   else if (capture && capture.status) parts.push(`Capture partial: ${Array.isArray(capture.reasons) && capture.reasons.length ? capture.reasons.join('; ') : 'see the capture diagnostic'}`);
   if (capture && numeric(capture.search_total) !== null) parts.push(`${displayNumber(capture.rows)} rows vs GitHub search total ${displayNumber(capture.search_total)}`);
-  if (data && data.pending) parts.push(`history pending for ${displayNumber(data.pending)} recently added repositories (read a few hundred a day; their unknown gains show "${PENDING}")${data.retrying ? `, ${displayNumber(data.retrying)} of them retried after a failed read` : ''}`);
   return parts.length ? parts.join(' · ') + '.' : null;
+}
+/* 'Nov 5' (with the year when it differs from the capture's) for the day a pending gain is known at the latest: the window's exact_since,
+   when it is after the capture date and within DATED_WITHIN_DAYS of it; null otherwise (already exact, far out, or unknown). */
+function pendingSince(window, date) {
+  const since = window ? utcDay(window.exact_since) : null, day = utcDay(date);
+  if (since === null || day === null || since <= day || since > shiftDay(day, DATED_WITHIN_DAYS)) return null;
+  return new Date(Date.parse(`${since}T00:00:00Z`)).toLocaleDateString('en-US', {month: 'short', day: 'numeric', timeZone: 'UTC', ...(since.slice(0, 4) === day.slice(0, 4) ? {} : {year: 'numeric'})});
+}
+/* The hover text of a gain shown as — because the repository's history is pending: why, and when the gain arrives. */
+function pendingTitle(window, date, retrying = false) {
+  const why = retrying ? 'a read of this repository\'s GitHub star history failed or came back incomplete; it is retried in turn' : 'this repository joined recently and its GitHub star history is read gradually, oldest first';
+  const since = pendingSince(window, date);
+  return `Not known yet: ${why}. Its stars are current; this gain appears once its history is read${since ? `, or from ${since} at the latest, when daily snapshots cover the window` : ''}.`;
+}
+/* The line above the table while any row's history is pending: how many rows, and for each window exact within DATED_WITHIN_DAYS the day
+   its column is known for every row; null when nothing is pending. */
+function pendingNote(data) {
+  if (!data || !data.pending) return null;
+  const dated = [], later = [];
+  for (const window of data.windows) {
+    const since = pendingSince(window, data.date), days = numeric(window.days);
+    if (since && days !== null) dated.push(`${days}-day from ${since}`);
+    else if (utcDay(window.exact_since) === null || utcDay(data.date) === null || window.exact_since > data.date) later.push(window);
+  }
+  const retried = data.retrying ? ` (${displayNumber(data.retrying)} retried after a failed read)` : '';
+  const when = later.length ? `${dated.length ? '; longer windows' : '; they appear'} as their history is read` : '';
+  return `Gains for ${displayNumber(data.pending)} recently added repositories${retried} aren't known yet${dated.length ? `: ${dated.join(', ')}` : ''}${when}.`;
 }
 function windowTooltip(window) {
   return `From GitHub's star history; exact daily snapshots from ${window && window.exact_since ? window.exact_since : UNKNOWN}`;
@@ -163,7 +191,7 @@ function parseQuery(search) {
     const value = parse(get(key));
     if (value) state[key] = value; else invalid.push([key, get(key), QUERY_HELP[key]]);
   }
-  if (get('sort') !== null) { if (COLUMNS.some(([key]) => key === get('sort'))) state.sort = get('sort'); else invalid.push(['sort', get('sort'), QUERY_HELP.sort]); }
+  if (get('sort') !== null) { if (COLUMNS.some(([key]) => key === get('sort'))) state.sort = get('sort'); else if (!RETIRED_SORTS.includes(get('sort'))) invalid.push(['sort', get('sort'), QUERY_HELP.sort]); }
   if (get('dir') !== null) { if (get('dir') === 'asc' || get('dir') === 'desc') state.direction = get('dir'); else invalid.push(['dir', get('dir'), QUERY_HELP.dir]); }
   if (get('page') !== null) { const page = starCount(get('page')); if (page) state.page = page; else invalid.push(['page', get('page'), QUERY_HELP.page]); }
   return {state, invalid};
@@ -194,30 +222,27 @@ function activeFilters(state) {
   return [['q', (state.search || '').trim()], ['language', state.language || ''], ['created', formatRange(state.created.after, state.created.before)],
     ['stars', formatRange(state.stars.min, state.stars.max)]].filter(([, value]) => value);
 }
-/* A row's value for a sort key: null sorts last in both directions. */
+/* A row's value for a sort key: null (an unknown date or count, a gain whose history is pending) sorts last in both directions. */
 function sortValue(row, key) {
   if (key === 'created_at') { if (row.created === undefined) row.created = creationTime(row.created_at); return row.created; }
-  if (key === 'full_name' || key === 'language') return typeof row[key] === 'string' && row[key] ? row[key].toLowerCase() : null;
   return numeric(row[key]);
 }
 /* Filter first, then sort the whole filtered list (pagination slices the result): a filter never applies to a pre-cut list. */
 function selectRows(rows, {sort = DEFAULT_SORT, direction = 'desc', ...filters} = {}) {
   const sign = direction === 'asc' ? 1 : -1;
-  const kind = (COLUMNS.find(([key]) => key === sort) || [])[2] || 'number';
   return filterRows(rows, filters)
     .sort((a, b) => {
       const av = sortValue(a, sort), bv = sortValue(b, sort);
       if (av === null && bv !== null) return 1;
       if (bv === null && av !== null) return -1;
-      if (av !== bv && av !== null) return kind === 'text' ? sign * av.localeCompare(bv) : sign * (av - bv);
+      if (av !== bv && av !== null) return sign * (av - bv);
       return (numeric(b.stars) ?? -1) - (numeric(a.stars) ?? -1) || String(a.full_name).localeCompare(String(b.full_name));
     });
 }
-/* The next sort state after a click on a header: a new column starts descending (text columns ascending), the same column flips. */
+/* The next sort state after a click on a header: a new column starts descending, the same column flips. */
 function nextSort(current, key) {
-  const kind = (COLUMNS.find(([k]) => k === key) || [])[2] || 'number';
   if (current.sort === key) return {sort: key, direction: current.direction === 'desc' ? 'asc' : 'desc'};
-  return {sort: key, direction: kind === 'text' ? 'asc' : 'desc'};
+  return {sort: key, direction: 'desc'};
 }
 /* [label, value] pairs for a repository record as returned by GET /repos/{owner}/{repo} (already reduced by repoOutcome); anything else is unknown. */
 function metadataFields(metadata) {
@@ -296,7 +321,7 @@ function createCountLoader(fetcher, storage, now = () => Date.now()) {
     return result;
   };
 }
-if (typeof module !== 'undefined') module.exports = {captureNote, PENDING, numeric, utcDay, parseRange, parseCreated, parseStars, formatRange, createdDay, filterRows, pageOf, parseQuery, serializeQuery, invalidNote, keepEarlyEdits, activeFilters, UNKNOWN_LANGUAGE, NO_FILTERS, PAGE_SIZE, creationTime, creationLabel, repoURL, displayNumber, timeLabel, clockLabel, parseData, windowTooltip, windowNote, sortValue, selectRows, nextSort, metadataFields, linkCount, countOutcome, repoOutcome, countLabel, apiRepoPath, createCountLoader, COLUMNS, GAIN_COLUMNS, GITHUB_COUNTS, DATA_FILE, DATA_SCHEMA, DEFAULT_SORT};
+if (typeof module !== 'undefined') module.exports = {captureNote, pendingSince, pendingTitle, pendingNote, RETIRED_SORTS, DATED_WITHIN_DAYS, numeric, utcDay, parseRange, parseCreated, parseStars, formatRange, createdDay, filterRows, pageOf, parseQuery, serializeQuery, invalidNote, keepEarlyEdits, activeFilters, UNKNOWN_LANGUAGE, NO_FILTERS, PAGE_SIZE, creationTime, creationLabel, repoURL, displayNumber, timeLabel, clockLabel, parseData, windowTooltip, windowNote, sortValue, selectRows, nextSort, metadataFields, linkCount, countOutcome, repoOutcome, countLabel, apiRepoPath, createCountLoader, COLUMNS, GAIN_COLUMNS, GITHUB_COUNTS, DATA_FILE, DATA_SCHEMA, DEFAULT_SORT};
 if (typeof document !== 'undefined') {
   const el = id => document.getElementById(id);
   let data = null, page = 1, state = {sort: DEFAULT_SORT, direction: 'desc', ...NO_FILTERS}, linkNote = null, selection = {key: null, rows: []};
@@ -392,12 +417,13 @@ if (typeof document !== 'undefined') {
     const {pages, offset} = current, body = el('rows'); body.replaceChildren();
     const total = rows.length.toLocaleString('en-US'), threshold = data.min_stars === null ? '' : ` with at least ${data.min_stars.toLocaleString('en-US')} stars`;
     el('result-count').textContent = sorted.length === rows.length ? `${total} repositories${threshold}` : `${sorted.length.toLocaleString('en-US')} of ${total} repositories${threshold}`;
-    if (data.min_stars !== null) { el('min-stars').textContent = data.min_stars.toLocaleString('en-US'); document.title = `Star Growth · Repositories with at least ${data.min_stars.toLocaleString('en-US')} stars`; }
+    if (data.min_stars !== null) { el('min-stars').textContent = data.min_stars.toLocaleString('en-US'); document.title = `Momentum · Repositories with at least ${data.min_stars.toLocaleString('en-US')} stars`; }
     el('updated').textContent = timeLabel(data.generated_at) !== UNKNOWN ? `Updated ${timeLabel(data.generated_at).slice(0, 16)} UTC` : '';
     renderHeaders(); renderChips();
     const note = windowNote(windows.find(w => w.column === chosen), data.date);  /* cards have no header row to carry it */
     el('sort-note').textContent = note || ''; el('sort-note').hidden = !note;
     const status = captureNote(data); el('capture-status').textContent = status || ''; el('capture-status').hidden = !status;
+    const pending = pendingNote(data); el('pending-note').textContent = pending || ''; el('pending-note').hidden = !pending;
     for (const [index, row] of current.rows.entries()) {
       const tr = node('tr'), repo = node('td', undefined, 'repo'), url = repoURL(row.full_name);
       const title = node(url ? 'a' : 'span', row.full_name || UNKNOWN, 'repo-name');
@@ -415,9 +441,9 @@ if (typeof document !== 'undefined') {
       if (numeric(row.stars) === null) stars.classList.add('muted');
       tr.append(node('td', String(offset + index + 1), 'rank'), repo, language, created, stars);
       for (const [index, key] of GAIN_COLUMNS.entries()) {
-        const value = numeric(row[key]), cell = node('td', value === null && row.pending ? PENDING : displayNumber(value, true), 'num gain');
+        const value = numeric(row[key]), cell = node('td', displayNumber(value, true), 'num gain');
         cell.dataset.label = COLUMNS.find(([k]) => k === key)[1];
-        if (value === null) { cell.classList.add('muted'); if (row.pending) { cell.classList.add('pending'); cell.title = row.retrying ? RETRYING_TITLE : PENDING_TITLE; } } else if (value > 0) cell.classList.add('gain-positive');
+        if (value === null) { cell.classList.add('muted'); if (row.pending) { cell.classList.add('pending'); cell.title = pendingTitle(windows[index], data.date, row.retrying); } } else if (value > 0) cell.classList.add('gain-positive');
         if (value !== null && (row.history_mask & (1 << index))) { cell.classList.add('approx'); cell.title = windowTooltip(windows[index]); }
         if (key === chosen) cell.classList.add('chosen');
         tr.append(cell);
