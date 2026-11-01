@@ -1,6 +1,7 @@
-"""Publishing repository metadata and per-topic growth rankings (api/v2 metadata.jsonl, topics.json, topics/<topic>.json) from
-the data branch's metadata shards. Network-free: the real 200-row windows fixture plus hand-written shards in the contract shape."""
-import copy, datetime as dt, hashlib, json, pathlib, shutil, tempfile, unittest
+"""Publishing repository metadata and per-topic growth rankings (api/v2 metadata.jsonl, topics.json, topics/<topic>.json) and the
+page's descriptions file from the data branch's metadata shards. Network-free: the real 200-row windows fixture plus hand-written
+shards in the contract shape."""
+import copy, datetime as dt, hashlib, json, pathlib, re, shutil, tempfile, unittest
 from publish import stage as st
 from publish.agent_feed import build_agent_feed
 from publish.topics import load_metadata
@@ -181,6 +182,51 @@ class AbsentAndBrokenMetadataTests(unittest.TestCase):
             (data / 'metadata/checked.json').write_text('[]')  # a broken checked file: published, dates unknown, reported
             result = st.stage_site(site, data, tmp / 'out2', now=NOW)
             self.assertIsNone(result['metadata']['oldest_checked']); self.assertIn('checked.json skipped', result['metadata']['problems'][0])
+
+
+class DescriptionsFileTests(unittest.TestCase):
+    """The page's descriptions file (docs/agent-feed.md, Publication): one line under each repository name, from the shards."""
+    def test_only_cohort_rows_with_a_known_non_empty_description_keyed_by_full_name(self):
+        doc, repos, order, niche, edge = scenario()
+        repos[IDS[order[4]]]['description'] = '   '  # blank: no line
+        repos['R_not_in_the_cohort'] = meta('an outsider', [])
+        described = st.descriptions_file(doc, load_metadata(write_metadata(pathlib.Path(tempfile.mkdtemp()) / 'data', repos)))
+        self.assertEqual(described['schema'], 1); self.assertEqual(described['date'], doc['date'])
+        names = doc['columns']['full_name']
+        self.assertEqual(described['descriptions'], {**{names[i]: 'a database' for i in niche[1:]}, names[niche[0]]: INJECTION, names[order[0]]: 'A fast vector-search engine',
+                                                     names[order[1]]: 'many topics', **{names[i]: 'x' for i in order[5:8]}})
+        self.assertNotIn(names[order[3]], described['descriptions'])  # gone: its last description is not shown
+        self.assertNotIn(names[edge[0]], described['descriptions'])  # null description
+        self.assertIsNone(st.descriptions_file(doc, None)); self.assertIsNone(st.descriptions_file(doc, {'repos': {}, 'checked': {}, 'problems': []}))
+        self.assertIsNone(st.descriptions_file(doc, load_metadata(write_metadata(pathlib.Path(tempfile.mkdtemp()) / 'data', {IDS[edge[0]]: meta(None, ['edge'])}))))
+
+    def test_the_staged_page_names_its_fingerprinted_descriptions_file_or_no_key_without_one(self):
+        doc, repos, *_ = scenario()
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = pathlib.Path(tmp); site = tmp / 'checkout'
+            for name in ('index.html', 'app.js', 'style.css', 'llms.txt', '.nojekyll', 'docs/agent-feed.md', 'docs/publish-page.yml'):
+                (site / name).parent.mkdir(parents=True, exist_ok=True); shutil.copyfile(ROOT / name, site / name)
+            diagnostic = {'date': doc['date'], 'captured_at': doc['generated_at'], 'discovery': {'status': 'complete'}, 'coverage': {'total_count': 200, 'total_count_source': 'search'}}
+            def data_dir(name, with_metadata):
+                data = tmp / name; (data / 'windows').mkdir(parents=True); (data / 'diagnostics' / doc['date'][:4]).mkdir(parents=True)
+                (data / 'windows/latest.json').write_text(json.dumps(doc)); (data / 'diagnostics' / doc['date'][:4] / f'{doc["date"]}.json').write_text(json.dumps(diagnostic))
+                return write_metadata(data, repos) if with_metadata else data
+            def page_of(out):
+                app = re.search(r'<script[^>]+src="([^"]+)"', (out / 'index.html').read_text())[1]
+                return json.loads((out / re.search(r"'(data\.[0-9a-f]{16}\.json)'", (out / app).read_text())[1]).read_text())
+            result = st.stage_site(site, data_dir('data', True), tmp / 'out', now=NOW)
+            page = page_of(tmp / 'out'); name = page['descriptions_file']
+            self.assertRegex(name, r'^descriptions\.[0-9a-f]{16}\.json$')
+            raw = (tmp / 'out' / name).read_bytes()
+            self.assertEqual(name, f'descriptions.{hashlib.sha256(raw).hexdigest()[:16]}.json')  # content-addressed like the other assets
+            self.assertEqual(json.loads(raw), st.descriptions_file(doc, load_metadata(tmp / 'data')))
+            self.assertEqual(result['descriptions'], {'file': name, 'bytes': len(raw), 'rows': len(json.loads(raw)['descriptions']), 'row_share': round(len(json.loads(raw)['descriptions']) / 200, 4)})
+            self.assertEqual(result['artifact_files'], sum(1 for p in (tmp / 'out').rglob('*') if p.is_file()))
+            self.assertNotIn(b'<img', raw.replace(INJECTION.encode(), b''))  # the injection text is a JSON string value, nothing else
+            # no metadata yet: no file, no key; the page shows its Details toggle on every row
+            result = st.stage_site(site, data_dir('bare', False), tmp / 'out-bare', now=NOW)
+            self.assertNotIn('descriptions_file', page_of(tmp / 'out-bare')); self.assertIsNone(result['descriptions'])
+            self.assertEqual([p.name for p in (tmp / 'out-bare').glob('descriptions.*')], [])
 
 
 if __name__ == '__main__':

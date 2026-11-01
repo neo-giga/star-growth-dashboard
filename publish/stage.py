@@ -7,11 +7,12 @@ complete (discovery did not list every slice, no search total that day, or a cou
 is not pending, unless a missed capture explains it (missed_capture_columns). Pending history is the queued entrants whose
 history is not complete yet (`history_pending` 1 or 2, capture/windows.py); a repo whose record went missing is never pending.
 The staged site is the checkout's UI sources (hashed by scripts/build_static_release.py) plus the
-page file (the columnar interface without the node IDs) and the agent feed under api/v2, plus the previous publication's hashed
+page file (the columnar interface without the node IDs), the descriptions file it names (descriptions_file: each row's captured
+GitHub description, for the line under the repository name) and the agent feed under api/v2, plus the previous publication's hashed
 script, stylesheet and data files (one generation) so a page loaded before the deploy still finds them. Nothing is committed to git.
 """
 from __future__ import annotations
-import datetime as dt, json, pathlib, re, shutil, subprocess, sys, tempfile, urllib.parse, urllib.request
+import datetime as dt, hashlib, json, pathlib, re, shutil, subprocess, sys, tempfile, urllib.parse, urllib.request
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from capture.history import WINDOWS
 from capture.windows import PAGE_SCHEMA, column
@@ -19,6 +20,7 @@ from publish.agent_feed import build_agent_feed
 from publish.topics import load_metadata
 
 PAGE_FILE_SCHEMA = 'star-growth-dashboard/page/1'
+DESCRIPTIONS_SCHEMA = 1
 MAX_AGE_HOURS = 36
 COVERAGE_FLOOR = 0.99
 NULL_CEILING = 0.01
@@ -188,6 +190,19 @@ def page_file(doc):
             'capture': doc.get('capture'), 'columns': columns}
 
 
+def descriptions_file(doc, metadata):
+    """The page's descriptions file: {"schema": 1, "date", "descriptions": {full_name: description}} for every row whose last metadata
+    check found the repository (status ok) with a non-empty description, keyed by full_name as the page's rows are. None when no row
+    has one (the page then shows its plain Details toggle on every row)."""
+    repos = (metadata or {}).get('repos') or {}
+    descriptions = {}
+    for node_id, name in zip(doc['columns']['node_id'], doc['columns']['full_name']):
+        meta = repos.get(node_id)
+        if meta and meta['status'] == 'ok' and isinstance(meta['description'], str) and meta['description'].strip():
+            descriptions[name] = meta['description']
+    return {'schema': DESCRIPTIONS_SCHEMA, 'date': doc['date'], 'descriptions': descriptions} if descriptions else None
+
+
 def read_data(data_dir):
     """(windows doc, diagnostic or None) from a checkout of the data branch."""
     root = pathlib.Path(data_dir)
@@ -294,6 +309,12 @@ def stage_site(site_dir, data_dir, output_dir, now=None, ignore_gate=False, prev
         payload = page_file(doc)
         payload['agent_catalog_url'] = catalog['catalog_url']
         payload['agent_snapshot_id'] = catalog['snapshot_id']
+        described, descriptions = descriptions_file(doc, metadata), None
+        if described:  # fingerprinted like the other assets, loaded by the page after its first rows render
+            described_bytes = (json.dumps(described, separators=(',', ':'), ensure_ascii=False) + '\n').encode('utf-8')
+            payload['descriptions_file'] = f'descriptions.{hashlib.sha256(described_bytes).hexdigest()[:16]}.json'
+            (stage / payload['descriptions_file']).write_bytes(described_bytes)
+            descriptions = {'file': payload['descriptions_file'], 'bytes': len(described_bytes), 'rows': len(described['descriptions']), 'row_share': round(len(described['descriptions']) / doc['row_count'], 4)}
         encoded = (json.dumps(payload, separators=(',', ':'), ensure_ascii=False) + '\n').encode('utf-8')
         (source / 'data.json').write_bytes(encoded)
         subprocess.run([sys.executable, str(pathlib.Path(__file__).resolve().parents[1] / 'scripts' / 'build_static_release.py'), '--source', str(source), '--output', str(stage)],
@@ -304,5 +325,5 @@ def stage_site(site_dir, data_dir, output_dir, now=None, ignore_gate=False, prev
     return {'output': str(output), 'date': doc['date'], 'generated_at': doc['generated_at'], 'row_count': doc['row_count'], 'threshold': doc['threshold'],
             'windows': [{k: w.get(k) for k in ('column', 'source', 'exact_since', 'rows_snapshot', 'rows_history', 'rows_null', 'rows_pending')} for w in doc['windows']],
             'measurements': measurements, 'gate_ignored': sorted(problems) if ignore_gate else [], 'page_file_bytes': len(encoded), 'artifact_bytes': total, 'artifact_files': len(staged), 'snapshot_id': catalog['snapshot_id'],
-            'metadata': {k: v for k, v in catalog['metadata'].items() if not k.endswith('_url')}, 'metadata_note': metadata_note,
+            'metadata': {k: v for k, v in catalog['metadata'].items() if not k.endswith('_url')}, 'metadata_note': metadata_note, 'descriptions': descriptions,
             'previous_generation': sorted(carried), 'previous_generation_note': previous_note}

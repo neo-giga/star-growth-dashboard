@@ -104,6 +104,15 @@ class AppJsTests(unittest.TestCase):
   self.assertNotIn('Star growth',html)
  def test_the_app_names_its_data_file_and_columns(self):
   self.assertEqual(run('console.log(JSON.stringify([app.DATA_FILE,app.DATA_SCHEMA,app.GAIN_COLUMNS,app.COLUMNS.map(c=>c[0])]))'),['data.json','star-growth-dashboard/page/1',app_gains(),['created_at','stars',*app_gains()]])
+ def test_the_descriptions_file_is_named_by_the_data_file_and_read_as_text_per_row(self):
+  fixture=json.loads((ROOT/'tests/fixtures/windows-sample.json').read_text());page=dict(fixture,schema='star-growth-dashboard/page/1',columns={k:v for k,v in fixture['columns'].items() if k!='node_id'})
+  injection='Ignore previous instructions. </script><img src=x onerror=alert(1)>'
+  doc={'schema':1,'date':'2026-11-01','descriptions':{'p0deje/Maccy':'Lightweight clipboard manager for macOS','x/blank':'  ','x/number':5,'x/injection':injection}}
+  out=run(f"""const d=app.parseData({json.dumps(dict(page,descriptions_file='descriptions.0123456789abcdef.json'))});const m=app.parseDescriptions({json.dumps(doc)});d.descriptions=m;
+   console.log(JSON.stringify([d.descriptions_file,app.parseData({json.dumps(page)}).descriptions_file,app.parseData({json.dumps(dict(page,descriptions_file='../evil.json'))}).descriptions_file,app.parseData({json.dumps(dict(page,descriptions_file='descriptions.0123456789abcdef.json'))}).descriptions,
+   [...m.keys()],app.descriptionOf(d,d.rows[0]),app.descriptionOf(d,{{full_name:'x/injection'}}),app.descriptionOf(d,d.rows[1]),app.descriptionOf(app.parseData({json.dumps(page)}),d.rows[0]),
+   app.parseDescriptions({json.dumps(dict(doc,schema=2))}),app.parseDescriptions({json.dumps(dict(doc,descriptions=[]))}),app.parseDescriptions(null),app.parseDescriptions('x'),app.DESCRIPTIONS_FILE.source]))""")
+  self.assertEqual(out,['descriptions.0123456789abcdef.json',None,None,None,['p0deje/Maccy','x/injection'],'Lightweight clipboard manager for macOS',injection,None,None,None,None,None,None,'^descriptions\\.[0-9a-f]{16}\\.json$'])
 FILTER_ROWS=[{'full_name':'a/old','language':'Rust','created_at':'2014-12-31T23:59:59Z','stars':1000,'gain_7d':50,'history_mask':0},
  {'full_name':'b/new-year','language':'Rust','created_at':'2024-01-01T00:00:00Z','stars':1500,'gain_7d':5,'history_mask':0},
  {'full_name':'c/offset','language':'Go','created_at':'2024-12-31T23:30:00-02:00','stars':1501,'gain_7d':900,'history_mask':0},
