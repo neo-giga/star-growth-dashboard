@@ -430,7 +430,12 @@ if (typeof document !== 'undefined') {
       /* The summary is the captured description, one line until opened (the full text, then the GitHub facts), or a plain Details toggle. */
       const details = node('details', undefined, 'repo-details'), panel = node('div', undefined, 'details-panel'), description = descriptionOf(data, row);
       if (description !== null) details.classList.add('described');
-      details.append(node('summary', description ?? 'Details'), panel);
+      const summary = node('summary', description ?? 'Details');
+      /* A described summary is selectable text: a press that moves before release is a drag selecting words, not a click, and leaves the panel as it is (Enter and Space have event.detail 0) */
+      let pressed = null;
+      summary.addEventListener('pointerdown', event => { pressed = [event.clientX, event.clientY]; });
+      summary.addEventListener('click', event => { if (event.detail && pressed && details.classList.contains('described') && Math.hypot(event.clientX - pressed[0], event.clientY - pressed[1]) > 4) event.preventDefault(); pressed = null; });
+      details.append(summary, panel);
       let attempted = false;
       details.addEventListener('toggle', () => { if (details.open && !attempted) { attempted = true; openDetails(panel, row, details.classList.contains('described')); } });
       repo.append(details); shown.push({row, details});
@@ -509,12 +514,14 @@ if (typeof document !== 'undefined') {
       if (descriptions && descriptions.size && data === loaded) { data.descriptions = descriptions; applyDescriptions(); }
     }).catch(() => {});
   }
-  /* The line under each name, on the rows already on screen: each row's summary text and class change, nothing is re-created. */
+  /* The line under each name, on the rows already on screen: each row's summary text and class change, nothing is re-created, except that a
+     panel built before the file arrived drops its Description row (the description is now the summary above it). */
   function applyDescriptions() {
     for (const {row, details} of shown) {
       const description = descriptionOf(data, row);
       if (description === null) continue;
       details.classList.add('described'); details.querySelector('summary').textContent = description;
+      for (const dt of details.querySelectorAll('.repo-metadata dt')) if (dt.textContent === 'Description') { dt.nextElementSibling.remove(); dt.remove(); }
     }
   }
   for (const button of document.querySelectorAll('th button.sort')) button.addEventListener('click', () => setSort(nextSort(state, button.dataset.key)));
