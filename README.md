@@ -14,9 +14,11 @@ the stars it gained over the past 1, 7, 15, 30, 90, 180 and 365 days, as static 
 - **Provenance in every answer:** each gain says whether it is exact (`snapshot`) or approximate (`history`); recently
   added repositories carry `history_pending`; the catalog says whether the day's capture was complete and why not.
 - **Contract:** [docs/agent-feed.md](docs/agent-feed.md), plus [`llms.txt`](llms.txt) as a short index.
-- **Not live yet:** topic or task queries ("top repositories for vector search this month") are a planned follow-on and
-  are not implemented here. The feed has no topics or descriptions yet, only names, languages, creation dates, stars and
-  gains; an agent can rank and filter by those today.
+- **Top repositories for X:** for each GitHub topic carried by at least three repositories, a file with every matching
+  repository ranked by 7-day gain, plus each repository's description and topics in `metadata.jsonl`. An agent maps X to
+  topic slugs itself; the recipe is in [docs/agent-feed.md](docs/agent-feed.md). Topics are read gradually by the daily
+  capture: the catalog's `metadata` block says how many repositories are covered (`absent` until the first read), and a
+  repository whose topics are unknown cannot appear. Membership is the exact GitHub topic, not semantic search.
 
 The webpage, **https://neo-giga.github.io/star-growth-dashboard/**, is a secondary human explorer over the same rows: one
 table sortable by any window, name search, language filter.
@@ -50,6 +52,17 @@ snapshots saved for reproducibility, seven sortable windows over every row and a
 individual repository's curve, visual comparison and embeds; use the two together (open a repository you found here in
 Star History to see its curve). This project does not draw charts and does not plan to.
 
+For "which repositories in topic X are gaining stars fastest", the other sources an agent can reach today rank something
+else. [OSS Insight](https://ossinsight.io/) has an agent API with curated collections and per-repository analytics, but
+its star-based rankings and trending are derived from GitHub's public events firehose and have been unavailable since
+2026-03-01: its API's own data-quality notice says event capture fell to roughly 0.3% of baseline, so the ordering would be
+noise ([`/api/mcp?action=trending`](https://ossinsight.io/api/mcp?action=trending), `data_quality.status: unavailable`, read
+2026-10-31; [its data-quality page](https://ossinsight.io/docs/data-quality)). Use it for curated domains and repository
+analytics. GitHub's own topic search (`topic:X sort:stars`) ranks by total stars, which favours age and past hype over
+current growth, and is rate-limited with no history. This dataset counts every repository's stars directly once a day, so
+the event-firehose collapse does not affect it, and ranks growth inside any GitHub topic over the whole cohort, from a dated
+snapshot, as static files. Star History stays complementary for the curve of any repository found here.
+
 ## Limits
 
 - **Not every GitHub repository**: public repositories at or over the star bar, as far as GitHub search lists them at
@@ -78,7 +91,8 @@ after this change ships (more than one day if search is degraded: see *Limits*);
   narrow screens. Gains that came from GitHub's star history rather than two daily snapshots are marked ≈. Expanding a row
   fetches live details from the GitHub API (see *Live details and rate limits*).
 - **The agent feed** (`api/v2`, schema `2.0`): a catalog pointing at one content-addressed snapshot with top-100 files per
-  window (JSON and Markdown), the full set as JSONL and CSV, the page's columnar file, a schema and a manifest. These files
+  window (JSON and Markdown), the full set as JSONL and CSV, the page's columnar file, a schema and a manifest; once the
+  daily capture has read repository metadata, also `metadata.jsonl`, the topic index `topics.json` and one file per topic. These files
   are generated at publish time and exist only on the live site, not in git.
 - **Daily star capture** records the star count of every repository over the threshold (`--threshold 999`: at least 1,000
   stars) on the orphan `data` branch, every day, kept forever, and reads at most 400 missing histories a day; **Publish the page** rebuilds and deploys the site from it after each capture.

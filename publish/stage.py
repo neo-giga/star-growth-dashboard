@@ -16,6 +16,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from capture.history import WINDOWS
 from capture.windows import PAGE_SCHEMA, column
 from publish.agent_feed import build_agent_feed
+from publish.topics import load_metadata
 
 PAGE_FILE_SCHEMA = 'star-growth-dashboard/page/1'
 MAX_AGE_HOURS = 36
@@ -269,6 +270,10 @@ def stage_site(site_dir, data_dir, output_dir, now=None, ignore_gate=False, prev
     problems, measurements = gate(doc, diagnostic, now or dt.datetime.now(dt.timezone.utc))
     if problems and not ignore_gate:
         raise GateRefused(problems, measurements)
+    try:
+        metadata, metadata_note = load_metadata(data_dir), None
+    except Exception as exc:  # noqa: BLE001 - metadata never blocks a publication; reported in the result
+        metadata, metadata_note = None, f'metadata unreadable: {type(exc).__name__}: {str(exc)[:200]}; published without it'
     carried, previous_note = {}, None
     if previous is not None:
         try:
@@ -282,7 +287,7 @@ def stage_site(site_dir, data_dir, output_dir, now=None, ignore_gate=False, prev
         temp = pathlib.Path(temp); stage = temp / 'site'; stage.mkdir(); copy_public_site(site, stage)
         for name, data in carried.items():
             (stage / name).write_bytes(data)
-        catalog = build_agent_feed(doc, stage)
+        catalog = build_agent_feed(doc, stage, metadata=metadata)
         source = temp / 'ui'; source.mkdir()
         for name, text in ui.items():
             (source / name).write_text(text, encoding='utf-8')
@@ -293,9 +298,11 @@ def stage_site(site_dir, data_dir, output_dir, now=None, ignore_gate=False, prev
         (source / 'data.json').write_bytes(encoded)
         subprocess.run([sys.executable, str(pathlib.Path(__file__).resolve().parents[1] / 'scripts' / 'build_static_release.py'), '--source', str(source), '--output', str(stage)],
                        check=True, capture_output=True, text=True)
-        total = sum(p.stat().st_size for p in stage.rglob('*') if p.is_file())
+        staged = [p for p in stage.rglob('*') if p.is_file()]
+        total = sum(p.stat().st_size for p in staged)
         shutil.move(str(stage), str(output))
     return {'output': str(output), 'date': doc['date'], 'generated_at': doc['generated_at'], 'row_count': doc['row_count'], 'threshold': doc['threshold'],
             'windows': [{k: w.get(k) for k in ('column', 'source', 'exact_since', 'rows_snapshot', 'rows_history', 'rows_null', 'rows_pending')} for w in doc['windows']],
-            'measurements': measurements, 'gate_ignored': sorted(problems) if ignore_gate else [], 'page_file_bytes': len(encoded), 'artifact_bytes': total, 'snapshot_id': catalog['snapshot_id'],
+            'measurements': measurements, 'gate_ignored': sorted(problems) if ignore_gate else [], 'page_file_bytes': len(encoded), 'artifact_bytes': total, 'artifact_files': len(staged), 'snapshot_id': catalog['snapshot_id'],
+            'metadata': {k: v for k, v in catalog['metadata'].items() if not k.endswith('_url')}, 'metadata_note': metadata_note,
             'previous_generation': sorted(carried), 'previous_generation_note': previous_note}

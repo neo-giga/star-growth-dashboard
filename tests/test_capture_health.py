@@ -217,22 +217,23 @@ class StaticTextTests(unittest.TestCase):
         self.assertNotRegex(html, r'(above|at least) [\d,]+ stars')
         self.assertNotRegex((ROOT / 'llms.txt').read_text().split('\n', 1)[0], r'[\d,]{4,} stars')
 
-    def test_the_readme_leads_with_agents_and_says_topic_queries_are_not_live(self):
+    def test_the_readme_leads_with_agents_and_states_the_topic_recipe_and_its_limits(self):
         readme = (ROOT / 'README.md').read_text()
         lead = readme.split('\n## ', 1)[0]
         self.assertIn('machine-readable GitHub repository discovery dataset for agents', lead)
         for harness in ('Claude Code', 'Muse', 'Grok'):
             self.assertIn(harness, lead)
         self.assertLess(lead.index('api/v2/catalog.json'), lead.index('https://neo-giga.github.io/star-growth-dashboard/**'))  # feed first, page second
-        self.assertRegex(lead, r'secondary human explorer'); self.assertRegex(lead, r'(?s)Not live yet.*topic or task queries.*not implemented')
+        self.assertRegex(lead, r'secondary human explorer'); self.assertRegex(lead, r'(?s)Top repositories for X.*cannot appear.*not semantic search')
         differs = readme.split('## How this differs from existing solutions', 1)[1].split('\n## ', 1)[0]
         for needle in ('https://www.star-history.com/', 'https://www.star-history.com/compare', 'https://www.star-history.com/blog/new-github-star-history-api',
-                       'Star Map', 'embeds', 'ranking', 'neither has exclusive or more'):
+                       'Star Map', 'embeds', 'ranking', 'neither has exclusive or more', 'https://ossinsight.io/api/mcp?action=trending',
+                       'unavailable since\n2026-03-01', 'data_quality.status: unavailable', 'ranks by total stars'):
             self.assertIn(needle, differs)
         self.assertIn('A partial day is not published', readme)
         for doc in ('llms.txt', 'docs/agent-feed.md'):
             text = (ROOT / doc).read_text()
-            self.assertIn('agents', text.split('\n\n', 2)[0] + text.split('\n\n', 2)[1]); self.assertRegex(text, r'planned follow-on, not live')
+            self.assertIn('agents', text.split('\n\n', 2)[0] + text.split('\n\n', 2)[1]); self.assertIn('topics_index_url', text); self.assertRegex(text, r'(not|never) "?the best'); self.assertIn('lexical', text)
 
 
 if __name__ == '__main__':
