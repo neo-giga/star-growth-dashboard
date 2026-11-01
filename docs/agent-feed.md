@@ -61,6 +61,26 @@ exclude null gains. CSV uses empty cells for null; `history_windows` lists the w
 `history_pending` is 1 for a pending row; text
 starting with a formula operator is apostrophe-prefixed for spreadsheet safety.
 
+## Filtering the full feed
+
+The page's filters mean exactly this; an agent filtering `all.jsonl` / `all.csv` itself gets the same rows by applying them the
+same way. All filters are AND-combined, and filtering happens on the whole set before any ranking or top-N cut (never filter a
+top-100 file and call it the full answer).
+
+- `language`: equal to the record's `language`; only "Unknown" matches a null (or empty) language, and a null language never
+  matches a named one.
+- `created`: compares the UTC calendar date of `created_at` (GitHub's creation instant converted to UTC, then its date) with
+  inclusive bounds; on/after only, on/before only, or both (a range). A record with a null or unparseable `created_at` never
+  matches a created bound.
+- `stars`: `stars` within inclusive minimum and/or maximum; a null `stars` never matches a bound. Stars and gains come from the
+  same capture.
+- Ranking after filtering: by the chosen gain (or column), then `stars` descending, then `full_name`; a null gain sorts last in
+  either direction and is never read as zero.
+
+The page keeps this state in its URL with GitHub's qualifier value syntax, e.g.
+`?language=Rust&created=2024-01-01..2024-12-31&stars=>=10000&sort=gain_30d` (`created` takes `>=D`, `<=D`, `D..D`; `stars` takes
+`>=N`, `<=N`, `N..N`). That URL is for people; it is not a query API, and nothing new is published for it.
+
 ## How a gain is computed, and the two sources
 
 The dataset captures every repository's star count once a day (05:30 UTC, dated by the US Pacific day it ends) and keeps every

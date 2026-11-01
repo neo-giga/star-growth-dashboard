@@ -1,4 +1,4 @@
-"""Exercise the app JS helpers under node: the page file parser, sorting (nulls last both ways), the sort-state machine, Link-count parsing, GitHub outcome mapping, the repository record, labels."""
+"""Exercise the app JS helpers under node: the page file parser, sorting (nulls last both ways), the sort-state machine, the filters and their URL state, Link-count parsing, GitHub outcome mapping, the repository record, labels."""
 import json,pathlib,re,shutil,subprocess,unittest
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 APP=ROOT/re.search(r'<script[^>]+src="([^"]+)"',(ROOT/'index.html').read_text())[1]
@@ -63,7 +63,7 @@ class AppJsTests(unittest.TestCase):
   rows=json.dumps([{'full_name':'b/two','language':'Go','created_at':'2020-01-02T00:00:00Z','stars':20,'gain_7d':5,'history_mask':0},{'full_name':'a/one','language':None,'created_at':'2021-01-02T00:00:00Z','stars':10,'gain_7d':None,'history_mask':0},
    {'full_name':'c/three','language':'Rust','created_at':None,'stars':30,'gain_7d':9,'history_mask':0},{'full_name':'d/four','language':'Rust','created_at':'2019-01-02T00:00:00Z','stars':30,'gain_7d':9,'history_mask':0}])
   out=run(f"""const rows={rows};const names=o=>app.selectRows(rows,o).map(r=>r.full_name);console.log(JSON.stringify([names({{sort:'gain_7d',direction:'desc'}}),names({{sort:'gain_7d',direction:'asc'}}),names({{sort:'created_at',direction:'desc'}}),names({{sort:'created_at',direction:'asc'}}),
-   names({{sort:'language',direction:'asc'}}),names({{sort:'language',direction:'desc'}}),names({{sort:'full_name',direction:'asc'}}),names({{sort:'stars',direction:'desc',search:'T'}}),names({{language:'Rust'}}),names({{language:'—'}}),
+   names({{sort:'language',direction:'asc'}}),names({{sort:'language',direction:'desc'}}),names({{sort:'full_name',direction:'asc'}}),names({{sort:'stars',direction:'desc',search:'T'}}),names({{language:'Rust'}}),names({{language:'Unknown'}}),
    app.nextSort({{sort:'gain_7d',direction:'desc'}},'gain_7d'),app.nextSort({{sort:'gain_7d',direction:'asc'}},'gain_7d'),app.nextSort({{sort:'gain_7d',direction:'asc'}},'stars'),app.nextSort({{sort:'stars',direction:'desc'}},'full_name'),app.DEFAULT_SORT]))""")
   self.assertEqual(out,[['c/three','d/four','b/two','a/one'],['b/two','c/three','d/four','a/one'],['a/one','b/two','d/four','c/three'],['d/four','b/two','a/one','c/three'],
    ['b/two','c/three','d/four','a/one'],['c/three','d/four','b/two','a/one'],['a/one','b/two','c/three','d/four'],['c/three','b/two'],['c/three','d/four'],['a/one'],
@@ -86,3 +86,50 @@ class AppJsTests(unittest.TestCase):
    0,1000,None,'Capture complete: every discovery slice listed and every count read · 66,914 rows vs GitHub search total 66,915 · history pending for 2 recently added repositories (read a few hundred a day; their unknown gains show "pending").','pending'])
  def test_the_app_names_its_data_file_and_columns(self):
   self.assertEqual(run('console.log(JSON.stringify([app.DATA_FILE,app.DATA_SCHEMA,app.GAIN_COLUMNS,app.COLUMNS.map(c=>c[0])]))'),['data.json','star-growth-dashboard/page/1',app_gains(),['full_name','language','created_at','stars',*app_gains()]])
+FILTER_ROWS=[{'full_name':'a/old','language':'Rust','created_at':'2014-12-31T23:59:59Z','stars':1000,'gain_7d':50,'history_mask':0},
+ {'full_name':'b/new-year','language':'Rust','created_at':'2024-01-01T00:00:00Z','stars':1500,'gain_7d':5,'history_mask':0},
+ {'full_name':'c/offset','language':'Go','created_at':'2024-12-31T23:30:00-02:00','stars':1501,'gain_7d':900,'history_mask':0},
+ {'full_name':'d/none','language':None,'created_at':None,'stars':None,'gain_7d':None,'history_mask':0},
+ {'full_name':'e/empty','language':'','created_at':'2024-06-01T00:00:00Z','stars':20000,'gain_7d':1,'history_mask':0}]
+@unittest.skipUnless(shutil.which('node'),'node not installed')
+class FilterTests(unittest.TestCase):
+ def names(self,options):
+  return run(f'console.log(JSON.stringify(app.filterRows({json.dumps(FILTER_ROWS)},{json.dumps(options)}).map(r=>r.full_name)))')
+ def test_created_bounds_are_inclusive_utc_dates_and_unknown_never_matches(self):
+  self.assertEqual(self.names({'created':{'after':'2024-01-01','before':None}}),['b/new-year','c/offset','e/empty'])
+  self.assertEqual(self.names({'created':{'after':None,'before':'2014-12-31'}}),['a/old'])
+  self.assertEqual(self.names({'created':{'after':'2024-01-01','before':'2024-12-31'}}),['b/new-year','e/empty'])  # c/offset is 2025-01-01 in UTC
+  self.assertEqual(self.names({'created':{'after':'2025-01-01','before':'2025-01-01'}}),['c/offset'])
+  self.assertEqual(self.names({'created':{'after':'2025-02-01','before':'2025-01-01'}}),[])
+ def test_stars_bounds_are_inclusive_and_unknown_never_matches(self):
+  self.assertEqual(self.names({'stars':{'min':1000,'max':1500}}),['a/old','b/new-year'])
+  self.assertEqual(self.names({'stars':{'min':1501,'max':None}}),['c/offset','e/empty'])
+  self.assertEqual(self.names({'stars':{'min':None,'max':999}}),[])
+ def test_language_unknown_matches_only_null_or_empty_and_filters_and_combine(self):
+  self.assertEqual(self.names({'language':'Unknown'}),['d/none','e/empty'])
+  self.assertEqual(self.names({'language':'Rust'}),['a/old','b/new-year'])
+  self.assertEqual(self.names({'language':'rust'}),[])
+  self.assertEqual(self.names({'language':'Rust','created':{'after':'2015-01-01','before':None},'stars':{'min':1500,'max':1500},'search':'NEW'}),['b/new-year'])
+  self.assertEqual(self.names({}),[r['full_name'] for r in FILTER_ROWS])
+ def test_filtering_precedes_sorting_and_paging(self):
+  rows=[{'full_name':f'o/r{i:03d}','language':'Go' if i%2 else 'Rust','created_at':'2020-01-01T00:00:00Z','stars':1000+i,'gain_7d':i,'history_mask':0} for i in range(120)]
+  out=run(f"""const rows={json.dumps(rows)};const s=app.selectRows(rows,{{sort:'gain_7d',direction:'desc',language:'Rust',stars:{{min:1010,max:null}}}});const p=app.pageOf(s,2,50),last=app.pageOf(s,9,50);
+   console.log(JSON.stringify([s.length,s[0].full_name,p.page,p.pages,p.offset,p.rows.length,p.rows[0].full_name,last.page,last.rows.length,last.rows.at(-1).full_name,app.pageOf([],3).page]))""")
+  # 55 Rust rows (even i) with stars >= 1010 (i >= 10): i = 10..118; the top of the filtered list is i=118, page 2 starts at the 51st (i=18)
+  self.assertEqual(out,[55,'o/r118',2,2,50,5,'o/r018',2,5,'o/r010',1])
+ def test_qualifier_ranges_parse_like_github_and_reject_the_rest(self):
+  out=run('''console.log(JSON.stringify([">=2024-01-01","<=2024-12-31","2024-01-01..2024-12-31","2024-02-29",">2024-12-31","<2024-03-01","*..2024-01-01","2024-01-01..*",
+   "2023-02-29","2024-1-01","*..*","yesterday","",">=","2024-01-01..2024-12-31..2025-01-01"].map(app.parseCreated)))''')
+  self.assertEqual(out,[{'after':'2024-01-01','before':None},{'after':None,'before':'2024-12-31'},{'after':'2024-01-01','before':'2024-12-31'},{'after':'2024-02-29','before':'2024-02-29'},
+   {'after':'2025-01-01','before':None},{'after':None,'before':'2024-02-29'},{'after':None,'before':'2024-01-01'},{'after':'2024-01-01','before':None},None,None,None,None,None,None,None])
+  self.assertEqual(run('console.log(JSON.stringify([">=10000","1000..5000","<=999",">999","<1000","1500","-5","1.5","1e3","10,000","99999999999999999999"].map(app.parseStars)))'),
+   [{'min':10000,'max':None},{'min':1000,'max':5000},{'min':None,'max':999},{'min':1000,'max':None},{'min':None,'max':999},{'min':1500,'max':1500},None,None,None,None,None])
+ def test_url_state_round_trips_and_invalid_values_are_ignored_with_a_note(self):
+  canonical=['','?q=react&language=Rust&created=2024-01-01..2024-12-31&stars=1000..1500&sort=stars&dir=asc&page=3','?created=%3E=2024-01-01','?created=%3C=2014-12-31&stars=%3E=10000','?language=Unknown','?q=a%20b%26c']
+  out=run(f'console.log(JSON.stringify({json.dumps(canonical)}.map(q=>{{const p=app.parseQuery(q);return [app.serializeQuery(p.state),p.invalid.length]}})))')
+  self.assertEqual(out,[[q,0] for q in canonical])
+  out=run('''const p=app.parseQuery("?created=2024-13-01&stars=lots&sort=nope&dir=up&page=0&language=Go&utm=x");console.log(JSON.stringify([p.state,p.invalid.map(i=>i.slice(0,2)),app.serializeQuery(p.state),app.invalidNote(p.invalid).slice(0,64),app.invalidNote([]),
+   app.activeFilters(app.parseQuery("?q=%20x%20&stars=%3E%3D5&created=2024-01-01").state),app.parseQuery("?created=>2024-01-01").state.created]))''')
+  self.assertEqual(out,[{'search':'','language':'Go','created':{'after':None,'before':None},'stars':{'min':None,'max':None},'sort':'gain_7d','direction':'desc','page':1},
+   [['created','2024-13-01'],['stars','lots'],['sort','nope'],['dir','up'],['page','0']],'?language=Go','Ignored from this link: created=2024-13-01 (expected a UTC date ',None,
+   [['q','x'],['created','2024-01-01..2024-01-01'],['stars','>=5']],{'after':'2024-01-02','before':None}])

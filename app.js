@@ -53,7 +53,7 @@ function clockLabel(value) {
   return Number.isFinite(instant) ? new Date(instant).toISOString().slice(11, 16) + ' UTC' : UNKNOWN;
 }
 /* The columnar page file as rows: {rows, windows, generated_at, date, threshold, row_count}, or an Error. Each row carries its search key
-   (lower-cased name) precomputed; the creation instant is parsed once per row the first time the created column is sorted. */
+   (lower-cased name) precomputed; the creation instant and UTC date are parsed once per row, the first time a sort or filter needs them. */
 function parseData(data) {
   if (!data || typeof data !== 'object' || data.schema !== DATA_SCHEMA || !data.columns || typeof data.columns !== 'object' || !Array.isArray(data.windows)) throw new Error('The local data file has an invalid format.');
   const count = numeric(data.row_count), columns = data.columns;
@@ -90,16 +90,112 @@ function windowNote(window, date) {
   if (days === null || window.baseline_date != null || typeof window.exact_since !== 'string' || typeof date !== 'string' || date < window.exact_since) return null;
   return `Not available today: the capture ${days} day${days === 1 ? '' : 's'} ago was missed`;
 }
+/* Filters, with GitHub's advanced-search meaning (language:, created:, stars:), AND-combined. created compares the UTC date of GitHub's
+   creation instant; bounds are inclusive; a row whose language, creation date or stars are unknown never matches a bound or a specific
+   language, and only UNKNOWN_LANGUAGE matches a null language. */
+const UNKNOWN_LANGUAGE = 'Unknown';
+const NO_FILTERS = Object.freeze({search: '', language: '', created: Object.freeze({after: null, before: null}), stars: Object.freeze({min: null, max: null})});
+/* 'YYYY-MM-DD' when value is a real calendar date, else null. */
+function utcDay(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+  const instant = Date.parse(`${value}T00:00:00Z`);
+  return Number.isFinite(instant) && new Date(instant).toISOString().slice(0, 10) === value ? value : null;
+}
+function shiftDay(day, days) { return new Date(Date.parse(`${day}T00:00:00Z`) + days * 864e5).toISOString().slice(0, 10); }
+function starCount(value) { return typeof value === 'string' && /^\d+$/.test(value) && Number.isSafeInteger(Number(value)) ? Number(value) : null; }
+/* GitHub qualifier value syntax for one inclusive range: >=X, >X, <=X, <X, X..Y (either side may be *) or X alone; {low, high} (null = open), or
+   null when the text is not one of those. */
+function parseRange(text, parse, step) {
+  const value = typeof text === 'string' ? text.trim() : '';
+  let match = /^(>=|<=|>|<)(.+)$/.exec(value);
+  if (match) {
+    const bound = parse(match[2]);
+    if (bound === null) return null;
+    return {'>=': {low: bound, high: null}, '<=': {low: null, high: bound}, '>': {low: step(bound, 1), high: null}, '<': {low: null, high: step(bound, -1)}}[match[1]];
+  }
+  match = /^([^.]+)\.\.([^.]+)$/.exec(value);
+  if (match) {
+    const low = match[1] === '*' ? null : parse(match[1]), high = match[2] === '*' ? null : parse(match[2]);
+    return (low === null && match[1] !== '*') || (high === null && match[2] !== '*') || (low === null && high === null) ? null : {low, high};
+  }
+  const bound = parse(value);
+  return bound === null ? null : {low: bound, high: bound};
+}
+function parseCreated(text) { const range = parseRange(text, utcDay, shiftDay); return range && {after: range.low, before: range.high}; }
+function parseStars(text) { const range = parseRange(text, starCount, (n, d) => n + d); return range && {min: range.low, max: range.high}; }
+/* The qualifier value for an inclusive range: '' (no bound), '>=low', '<=high' or 'low..high'. */
+function formatRange(low, high) {
+  if (low === null && high === null) return '';
+  return high === null ? `>=${low}` : low === null ? `<=${high}` : `${low}..${high}`;
+}
+/* The UTC date a row was created, computed once per row. */
+function createdDay(row) {
+  if (row.created_day === undefined) { const instant = sortValue(row, 'created_at'); row.created_day = instant === null ? null : new Date(instant).toISOString().slice(0, 10); }
+  return row.created_day;
+}
+function filterRows(rows, {search = '', language = '', created = NO_FILTERS.created, stars = NO_FILTERS.stars} = {}) {
+  const query = search.trim().toLowerCase(), after = created.after, before = created.before, min = stars.min, max = stars.max;
+  const dated = after !== null || before !== null, counted = min !== null || max !== null;
+  return rows.filter(row => {
+    if (language && (language === UNKNOWN_LANGUAGE ? !!row.language : row.language !== language)) return false;
+    if (query && !(row.search || String(row.full_name || '').toLowerCase()).includes(query)) return false;
+    if (dated) { const day = createdDay(row); if (day === null || (after !== null && day < after) || (before !== null && day > before)) return false; }
+    if (counted) { const n = numeric(row.stars); if (n === null || (min !== null && n < min) || (max !== null && n > max)) return false; }
+    return true;
+  });
+}
+/* One page of an already filtered and sorted list: the page number is clamped to [1, pages]. */
+function pageOf(rows, page, size = PAGE_SIZE) {
+  const pages = Math.max(1, Math.ceil(rows.length / size)), current = Math.min(Math.max(1, page), pages), offset = (current - 1) * size;
+  return {page: current, pages, offset, rows: rows.slice(offset, offset + size)};
+}
+/* URL state: ?q=&language=&created=&stars=&sort=&dir=&page=, created and stars in GitHub's qualifier value syntax. Unknown parameters are
+   ignored; a known one with an invalid value is dropped and listed in invalid as [parameter, value, what it should be]. */
+const QUERY_HELP = {created: 'a UTC date or range such as >=2024-01-01, <=2024-12-31 or 2024-01-01..2024-12-31', stars: 'a star count or range such as >=10000 or 1000..5000',
+  sort: 'a column name', dir: 'asc or desc', page: 'a page number', language: 'a language in this dataset'};
+function parseQuery(search) {
+  const params = new URLSearchParams(search || ''), invalid = [], get = key => { const value = params.get(key); return value === null || value === '' ? null : value; };
+  const state = {...NO_FILTERS, sort: DEFAULT_SORT, direction: 'desc', page: 1};
+  if (get('q') !== null) state.search = get('q');
+  if (get('language') !== null) state.language = get('language');
+  for (const [key, parse] of [['created', parseCreated], ['stars', parseStars]]) {
+    if (get(key) === null) continue;
+    const value = parse(get(key));
+    if (value) state[key] = value; else invalid.push([key, get(key), QUERY_HELP[key]]);
+  }
+  if (get('sort') !== null) { if (COLUMNS.some(([key]) => key === get('sort'))) state.sort = get('sort'); else invalid.push(['sort', get('sort'), QUERY_HELP.sort]); }
+  if (get('dir') !== null) { if (get('dir') === 'asc' || get('dir') === 'desc') state.direction = get('dir'); else invalid.push(['dir', get('dir'), QUERY_HELP.dir]); }
+  if (get('page') !== null) { const page = starCount(get('page')); if (page) state.page = page; else invalid.push(['page', get('page'), QUERY_HELP.page]); }
+  return {state, invalid};
+}
+function serializeQuery(state) {
+  const pairs = [['q', (state.search || '').trim()], ['language', state.language || ''], ['created', formatRange(state.created.after, state.created.before)],
+    ['stars', formatRange(state.stars.min, state.stars.max)], ['sort', state.sort === DEFAULT_SORT ? '' : state.sort], ['dir', state.direction === 'asc' ? 'asc' : ''],
+    ['page', state.page > 1 ? String(state.page) : '']];
+  const text = pairs.filter(([, value]) => value).map(([key, value]) => `${key}=${encodeURIComponent(value).replace(/%3D/g, '=').replace(/%3A/g, ':').replace(/%2F/g, '/').replace(/%2C/g, ',')}`).join('&');
+  return text ? `?${text}` : '';
+}
+/* The visible note for parameters dropped from a link, or null. */
+function invalidNote(invalid) {
+  if (!invalid.length) return null;
+  return `Ignored from this link: ${invalid.map(([key, value, help]) => `${key}=${value} (expected ${help})`).join('; ')}. The other filters still apply.`;
+}
+/* Active filters as [key, qualifier text] pairs, in the URL's order; the chips render these. */
+function activeFilters(state) {
+  return [['q', (state.search || '').trim()], ['language', state.language || ''], ['created', formatRange(state.created.after, state.created.before)],
+    ['stars', formatRange(state.stars.min, state.stars.max)]].filter(([, value]) => value);
+}
 /* A row's value for a sort key: null sorts last in both directions. */
 function sortValue(row, key) {
   if (key === 'created_at') { if (row.created === undefined) row.created = creationTime(row.created_at); return row.created; }
   if (key === 'full_name' || key === 'language') return typeof row[key] === 'string' && row[key] ? row[key].toLowerCase() : null;
   return numeric(row[key]);
 }
-function selectRows(rows, {sort = DEFAULT_SORT, direction = 'desc', search = '', language = ''} = {}) {
-  const query = search.trim().toLowerCase(), sign = direction === 'asc' ? 1 : -1;
+/* Filter first, then sort the whole filtered list (pagination slices the result): a filter never applies to a pre-cut list. */
+function selectRows(rows, {sort = DEFAULT_SORT, direction = 'desc', ...filters} = {}) {
+  const sign = direction === 'asc' ? 1 : -1;
   const kind = (COLUMNS.find(([key]) => key === sort) || [])[2] || 'number';
-  return rows.filter(row => (!language || (row.language || UNKNOWN) === language) && (!query || (row.search || String(row.full_name || '').toLowerCase()).includes(query)))
+  return filterRows(rows, filters)
     .sort((a, b) => {
       const av = sortValue(a, sort), bv = sortValue(b, sort);
       if (av === null && bv !== null) return 1;
@@ -191,13 +287,21 @@ function createCountLoader(fetcher, storage, now = () => Date.now()) {
     return result;
   };
 }
-if (typeof module !== 'undefined') module.exports = {captureNote, PENDING, numeric, creationTime, creationLabel, repoURL, displayNumber, timeLabel, clockLabel, parseData, windowTooltip, windowNote, sortValue, selectRows, nextSort, metadataFields, linkCount, countOutcome, repoOutcome, countLabel, apiRepoPath, createCountLoader, COLUMNS, GAIN_COLUMNS, GITHUB_COUNTS, DATA_FILE, DATA_SCHEMA, DEFAULT_SORT};
+if (typeof module !== 'undefined') module.exports = {captureNote, PENDING, numeric, utcDay, parseRange, parseCreated, parseStars, formatRange, createdDay, filterRows, pageOf, parseQuery, serializeQuery, invalidNote, activeFilters, UNKNOWN_LANGUAGE, NO_FILTERS, PAGE_SIZE, creationTime, creationLabel, repoURL, displayNumber, timeLabel, clockLabel, parseData, windowTooltip, windowNote, sortValue, selectRows, nextSort, metadataFields, linkCount, countOutcome, repoOutcome, countLabel, apiRepoPath, createCountLoader, COLUMNS, GAIN_COLUMNS, GITHUB_COUNTS, DATA_FILE, DATA_SCHEMA, DEFAULT_SORT};
 if (typeof document !== 'undefined') {
   const el = id => document.getElementById(id);
-  let data = null, page = 1, state = {sort: DEFAULT_SORT, direction: 'desc'};
+  let data = null, page = 1, state = {sort: DEFAULT_SORT, direction: 'desc', ...NO_FILTERS}, linkNote = null, selection = {key: null, rows: []};
   const session = (() => { try { return window.sessionStorage; } catch (_) { return null; } })();
   const memory = new Map(), storage = session || {getItem: key => memory.get(key) ?? null, setItem: (key, value) => memory.set(key, value)};
   const loadCounts = createCountLoader((...args) => fetch(...args), storage);
+  /* Drawn icons (24-unit grid, 1.75 stroke, round caps), the Practice Lab's set. */
+  const ICONS = {x: 'M6.5 6.5l11 11M17.5 6.5l-11 11', sun: 'M12 16.5a4.5 4.5 0 1 0 0-9 4.5 4.5 0 0 0 0 9zM12 2.5v2M12 19.5v2M4.6 4.6l1.4 1.4M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4 6 18M18 6l1.4-1.4',
+    moon: 'M20 14.2A8 8 0 0 1 9.8 4a8 8 0 1 0 10.2 10.2z', system: 'M4 5h16v11H4zM9 20h6M12 16v4'};
+  const icon = name => {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'), path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    for (const [k, v] of Object.entries({class: 'icon', viewBox: '0 0 24 24', width: '16', height: '16', fill: 'none', stroke: 'currentColor', 'stroke-width': '1.75', 'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true'})) svg.setAttribute(k, v);
+    path.setAttribute('d', ICONS[name]); svg.append(path); return svg;
+  };
   const node = (tag, text, className) => {
     const element = document.createElement(tag);
     if (text !== undefined) element.textContent = text;
@@ -234,23 +338,58 @@ if (typeof document !== 'undefined') {
         const mark = node('span', '≈', 'approx'); mark.title = windowTooltip(window); button.append(mark);
       }
     }
-    el('sort').value = state.sort; el('direction').value = state.direction;
+    el('sort').value = state.sort;
+    for (const button of document.querySelectorAll('#direction button')) button.setAttribute('aria-pressed', String(button.dataset.dir === state.direction));
+  }
+  /* The filter controls show the state (after a link, back/forward or a chip removal); the state is read back from them on input. */
+  function writeControls() {
+    el('search').value = state.search; el('language').value = state.language;
+    el('created-after').value = state.created.after || ''; el('created-before').value = state.created.before || '';
+    el('stars-min').value = state.stars.min === null ? '' : String(state.stars.min); el('stars-max').value = state.stars.max === null ? '' : String(state.stars.max);
+    for (const id of ['stars-min', 'stars-max']) el(id).removeAttribute('aria-invalid');
+  }
+  function readControls() {
+    let invalid = false;
+    const star = id => {
+      const text = el(id).value.trim(), n = starCount(text), bad = el(id).validity.badInput || (!!text && n === null);
+      if (bad) { invalid = true; el(id).setAttribute('aria-invalid', 'true'); } else el(id).removeAttribute('aria-invalid');
+      return bad ? null : n;
+    };
+    const next = {search: el('search').value, language: el('language').value, created: {after: utcDay(el('created-after').value), before: utcDay(el('created-before').value)},
+      stars: {min: star('stars-min'), max: star('stars-max')}};
+    return {next, note: invalid ? 'Star bounds are whole numbers; the invalid bound is ignored.' : null};
+  }
+  function renderChips() {
+    const list = el('chips'), active = activeFilters(state);
+    list.replaceChildren();
+    for (const [key, value] of active) {
+      const item = node('li'), chip = node('button', undefined, 'chip'), name = key === 'q' ? 'name' : key;
+      chip.type = 'button'; chip.dataset.filter = key; chip.setAttribute('aria-label', `Remove filter ${name}: ${value}`);
+      chip.append(node('span', `${name}:`, 'chip-key'), node('span', value, 'chip-value'), icon('x'));
+      item.append(chip); list.append(item);
+    }
+    el('active-filters').hidden = !active.length;
+  }
+  function renderNotes(inputNote) {
+    const text = [linkNote, inputNote].filter(Boolean).join(' ');
+    el('filter-note').textContent = text; el('filter-note').hidden = !text;
   }
   function render() {
     if (!data) return;
     const {rows, windows} = data, chosen = GAIN_COLUMNS.includes(state.sort) ? state.sort : DEFAULT_SORT;
-    const sorted = selectRows(rows, {...state, search: el('search').value, language: el('language').value});
-    const pages = Math.max(1, Math.ceil(sorted.length / PAGE_SIZE)); page = Math.min(page, pages);
-    const offset = (page - 1) * PAGE_SIZE, body = el('rows'); body.replaceChildren();
+    const key = JSON.stringify([state.sort, state.direction, state.search.trim().toLowerCase(), state.language, state.created, state.stars]);
+    if (selection.key !== key) selection = {key, rows: selectRows(rows, state)};  /* paging reuses the filtered, sorted list */
+    const sorted = selection.rows, current = pageOf(sorted, page); page = current.page;
+    const {pages, offset} = current, body = el('rows'); body.replaceChildren();
     const total = rows.length.toLocaleString('en-US'), threshold = data.min_stars === null ? '' : ` with at least ${data.min_stars.toLocaleString('en-US')} stars`;
     el('result-count').textContent = sorted.length === rows.length ? `${total} repositories${threshold}` : `${sorted.length.toLocaleString('en-US')} of ${total} repositories${threshold}`;
     if (data.min_stars !== null) { el('min-stars').textContent = data.min_stars.toLocaleString('en-US'); document.title = `Star Growth · Repositories with at least ${data.min_stars.toLocaleString('en-US')} stars`; }
     el('updated').textContent = timeLabel(data.generated_at) !== UNKNOWN ? `Updated ${timeLabel(data.generated_at).slice(0, 16)} UTC` : '';
-    renderHeaders();
+    renderHeaders(); renderChips();
     const note = windowNote(windows.find(w => w.column === chosen), data.date);  /* cards have no header row to carry it */
     el('sort-note').textContent = note || ''; el('sort-note').hidden = !note;
     const status = captureNote(data); el('capture-status').textContent = status || ''; el('capture-status').hidden = !status;
-    for (const [index, row] of sorted.slice(offset, offset + PAGE_SIZE).entries()) {
+    for (const [index, row] of current.rows.entries()) {
       const tr = node('tr'), repo = node('td', undefined, 'repo'), url = repoURL(row.full_name);
       const title = node(url ? 'a' : 'span', row.full_name || UNKNOWN, 'repo-name');
       if (url) { title.href = url; title.target = '_blank'; title.rel = 'noopener noreferrer'; }
@@ -276,26 +415,78 @@ if (typeof document !== 'undefined') {
       }
       body.append(tr);
     }
-    if (!sorted.length) { const td = node('td', 'No matches. Try clearing the search or language filter.', 'empty'); td.colSpan = 5 + GAIN_COLUMNS.length; const tr = node('tr'); tr.append(td); body.append(tr); }
+    if (!sorted.length) { const td = node('td', 'No repositories match these filters. Remove a filter or clear them all.', 'empty'); td.colSpan = 5 + GAIN_COLUMNS.length; const tr = node('tr'); tr.append(td); body.append(tr); }
     el('previous').disabled = page <= 1; el('next').disabled = page >= pages;
     el('page-label').textContent = `Page ${page} of ${pages}`;
   }
-  function setSort(next) { state = next; page = 1; render(); }
+  /* Every change lands in the URL: discrete changes push a history entry, typing replaces the current one, back/forward restore it. Writes
+     within 120 ms coalesce into one (a burst of clicks is one entry, and the browser's history rate limit is never reached). */
+  let urlWrite = null;
+  function writeURL(push) {
+    urlWrite = {push: push || (urlWrite && urlWrite.push), timer: (clearTimeout(urlWrite && urlWrite.timer), setTimeout(() => {
+      const url = `${location.pathname}${serializeQuery({...state, page})}${location.hash}`, mode = urlWrite.push ? 'pushState' : 'replaceState'; urlWrite = null;
+      if (url !== `${location.pathname}${location.search}${location.hash}`) history[mode](null, '', url);
+    }, 120))};
+  }
+  function commit(changes, {push = true, keepPage = false} = {}) {
+    state = {...state, ...changes}; if (!keepPage) page = 1;
+    render(); writeURL(push);
+  }
+  function setSort(next) { commit(next); }
+  function applyFilters(push) { const {next, note} = readControls(); linkNote = null; renderNotes(note); commit(next, {push}); }
+  /* State from the URL: invalid values are dropped and named in a note; a language the dataset does not have is dropped the same way. */
+  function loadURL() {
+    const {state: parsed, invalid} = parseQuery(location.search);
+    if (parsed.language && ![...el('language').options].some(option => option.value === parsed.language)) { invalid.push(['language', parsed.language, QUERY_HELP.language]); parsed.language = ''; }
+    page = parsed.page; delete parsed.page; state = parsed; linkNote = invalidNote(invalid);
+    writeControls(); renderNotes(null); render();
+  }
+  const debounce = (fn, ms) => { let timer = null; return () => { clearTimeout(timer); timer = setTimeout(fn, ms); }; };
   fetch(DATA_FILE, {cache: 'no-store'}).then(response => {
     if (!response.ok) throw new Error(`Data request failed (${response.status}).`);
     return response.json();
   }).then(payload => {
     data = parseData(payload);
-    const languages = [...new Set(data.rows.map(r => r.language || UNKNOWN))].sort();
-    for (const language of languages) { const option = node('option', language); option.value = language; el('language').append(option); }
-    render();
+    const counts = new Map();
+    for (const row of data.rows) { const language = row.language || UNKNOWN_LANGUAGE; counts.set(language, (counts.get(language) || 0) + 1); }
+    const unknown = counts.get(UNKNOWN_LANGUAGE); counts.delete(UNKNOWN_LANGUAGE);
+    for (const [language, count] of [...[...counts].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)), ...(unknown ? [[UNKNOWN_LANGUAGE, unknown]] : [])]) {
+      const option = node('option', `${language} (${count.toLocaleString('en-US')})`); option.value = language; el('language').append(option);
+    }
+    loadURL();
   }).catch(error => {
     el('error').hidden = false; el('error').textContent = `${error.message} This page must be served over HTTP(S), not opened as a local file.`;
     el('result-count').textContent = 'No data loaded.'; el('page-label').textContent = '';
   });
   for (const button of document.querySelectorAll('th button.sort')) button.addEventListener('click', () => setSort(nextSort(state, button.dataset.key)));
   el('sort').addEventListener('change', () => setSort({sort: el('sort').value, direction: state.direction}));
-  el('direction').addEventListener('change', () => setSort({sort: state.sort, direction: el('direction').value}));
-  for (const id of ['language', 'search']) el(id).addEventListener(id === 'search' ? 'input' : 'change', () => {page = 1; render();});
-  for (const [id, delta] of [['previous', -1], ['next', 1]]) el(id).addEventListener('click', () => {page += delta; render();});
+  for (const button of document.querySelectorAll('#direction button')) button.addEventListener('click', () => setSort({sort: state.sort, direction: button.dataset.dir}));
+  const typed = debounce(() => applyFilters(false), 150);
+  for (const id of ['search', 'stars-min', 'stars-max']) { el(id).addEventListener('input', typed); el(id).addEventListener('change', () => applyFilters(true)); }
+  for (const id of ['language', 'created-after', 'created-before']) el(id).addEventListener('change', () => applyFilters(true));
+  el('chips').addEventListener('click', event => {
+    const chip = event.target.closest('button.chip'); if (!chip) return;
+    const chips = [...el('chips').querySelectorAll('button.chip')], index = chips.indexOf(chip);
+    commit({q: {search: ''}, language: {language: ''}, created: {created: NO_FILTERS.created}, stars: {stars: NO_FILTERS.stars}}[chip.dataset.filter]);
+    writeControls(); linkNote = null; renderNotes(null);
+    const left = [...el('chips').querySelectorAll('button.chip')];  /* keep keyboard focus in the chip row, else return it to the search box */
+    (left[Math.min(index, left.length - 1)] || el('search')).focus();
+  });
+  el('clear-all').addEventListener('click', () => { commit({...NO_FILTERS}); writeControls(); linkNote = null; renderNotes(null); el('search').focus(); });
+  window.addEventListener('popstate', () => { if (urlWrite) { clearTimeout(urlWrite.timer); urlWrite = null; } if (data) loadURL(); });
+  for (const [id, delta] of [['previous', -1], ['next', 1]]) el(id).addEventListener('click', () => { page += delta; commit({}, {keepPage: true}); });
+  /* Theme: system -> light -> dark -> system, stored like the Practice Lab's and applied before first paint by index.html's inline script. */
+  const THEME_KEY = 'sgt:v1:theme', THEMES = {system: ['light', 'System theme', 'system'], light: ['dark', 'Light theme', 'sun'], dark: ['system', 'Dark theme', 'moon']};
+  const readTheme = () => { try { const t = JSON.parse(localStorage.getItem(THEME_KEY) || '"system"'); return THEMES[t] ? t : 'system'; } catch (_) { return 'system'; } };
+  function applyTheme(theme) {
+    if (theme === 'system') document.documentElement.removeAttribute('data-theme'); else document.documentElement.setAttribute('data-theme', theme);
+    const dark = theme === 'dark' || (theme === 'system' && matchMedia('(prefers-color-scheme: dark)').matches);
+    document.querySelector('meta[name="theme-color"]').setAttribute('content', dark ? '#0b0b0c' : '#fafafa');
+    const [next, label, glyph] = THEMES[theme], button = el('theme');
+    button.dataset.theme = theme; button.title = `${label} (click for ${THEMES[next][1].toLowerCase()})`;
+    button.querySelector('.theme-label').textContent = label; button.querySelector('svg').replaceWith(icon(glyph));
+  }
+  el('theme').addEventListener('click', () => { const next = THEMES[readTheme()][0]; try { localStorage.setItem(THEME_KEY, JSON.stringify(next)); } catch (_) {} applyTheme(next); });
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => readTheme() === 'system' && applyTheme('system'));
+  applyTheme(readTheme());
 }
