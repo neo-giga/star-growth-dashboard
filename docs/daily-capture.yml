@@ -17,6 +17,10 @@ on:
         description: 'Snapshot the known set only; no search for new repositories'
         type: boolean
         default: false
+      metadata_queries:
+        description: 'Metadata (description and topics) queries of 100 repos each this run; 0 disables the step'
+        type: string
+        default: '300'
 permissions:
   contents: read
 concurrency:
@@ -26,7 +30,7 @@ jobs:
   capture:
     if: github.repository == 'neo-giga/star-growth-dashboard' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
-    timeout-minutes: 150  # day one of the 1,000-star set reads ~33k new counts; history stops at 110 min (HISTORY_DEADLINE_MINUTES)
+    timeout-minutes: 150  # day one of the 1,000-star set reads ~33k new counts; history stops at 110 min (HISTORY_DEADLINE_MINUTES), metadata at 125 (METADATA_DEADLINE_MINUTES)
     permissions:
       contents: write  # commit the day's files to the data branch; this job only
     steps:
@@ -54,10 +58,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           THRESHOLD: ${{ inputs.threshold || '999' }}
           SKIP_DISCOVERY: ${{ inputs.skip_discovery && '--skip-discovery' || '' }}
+          METADATA_QUERIES: ${{ inputs.metadata_queries || '300' }}
         run: |
           set +e
           python3 scripts/daily_capture.py --data-dir data-branch --threshold "$THRESHOLD" $SKIP_DISCOVERY --workers 4 --deadline-minutes 75 \
-            --diagnostic "$RUNNER_TEMP/capture-diagnostic.json"
+            --metadata-queries "$METADATA_QUERIES" --diagnostic "$RUNNER_TEMP/capture-diagnostic.json"
           code=$?
           echo "code=$code" >> "$GITHUB_OUTPUT"
           # 0: fine. 3: written, but coverage is under the floor or a count batch stayed unread. Anything else: a crash. The files are committed first in every case.

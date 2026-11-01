@@ -21,6 +21,8 @@ daily capture runs at 05:30 UTC, i.e. 22:30 PDT / 21:30 PST, so a snapshot is da
 | `history-pending.json` | daily | the history queues: `{schema, updated_at, repos: {node_id: entry}, repair: {node_id: entry}}`, entry `{since, attempts, last_attempt, last_status}`. A repo that enters the set without a complete history record is queued in `repos` (pending; `since` = its first day); a known eligible repo whose record is missing or incomplete goes to `repair` (never pending). A record is complete when it holds days and either has no older history or reaches more than 366 days before its anchor day; an incomplete read is kept (unless an earlier record reaches further back) and the repo stays queued with `last_status` `incomplete`. The daily capture reads at most 400 histories a day inside a 900 core requests/hour budget, and no history request starts after 110 min (40 of the job's 150 min stay for writing and committing). Each lane is in turn order: `last_attempt` (or `since` before the first attempt), fewer attempts, then `since`, so a failing repo goes behind those that waited longer. Repairs get at most half the day's reads while pending repos wait, and the two lanes are interleaved. |
 | `snapshots/YYYY/YYYY-MM-DD.json` | daily, forever | `{schema, date, captured_at, threshold, rows, node_id: [...], stars: [...]}`, sorted by node ID, plain compact JSON (not gzipped: git delta-compresses consecutive days). One count per known repo that answered that day (a repo the answer says is gone, NOT_FOUND, is left out; one whose read failed or errored is unread, never left out silently). A rerun on the same Pacific day keeps the earlier run's count for a repo it cannot read. |
 | `history/XX.json` | backfill, daily | per-day star history by node ID, 256 shards by the first two hex digits of SHA-1(node ID): `{node_id: {start, days, through, anchor_at, anchor_stars, pages, has_more}}` (below). |
+| `metadata/shards/XX.json` | daily | each cohort repo's description and GitHub topics, 256 shards by the first two hex digits of SHA-1(node ID): `{"schema": 1, "repos": {node_id: {description, topics, topics_total, changed, status}}}`. `description` is a string or null; `topics` the names in GitHub's order, at most 20 (`repositoryTopics(first: 20)`); `topics_total` GitHub's `totalCount`, so `topics_total > len(topics)` shows a truncation; `changed` the Pacific date the content last changed; `status` `ok`, or `gone` when GitHub answered null without an error or with NOT_FOUND (the last known description and topics stay). A shard is rewritten only when a record's content (description, topics, topics_total, status) changes. A repo absent from every shard was never fetched: its metadata is unknown, not empty. |
+| `metadata/checked.json` | daily | `{"schema": 1, "checked": {node_id: "YYYY-MM-DD"}}`: the last successful metadata check of each repo, rewritten whenever a check succeeded. A read that failed or errored at the repo's path leaves its record and its date as they were; a date is never moved back (a run dated earlier than a stored check leaves both alone). |
 | `windows/latest.json` | daily, **not committed** | the page-ready file (below). Written by the capture into its working copy and listed in the branch's `.gitignore` (`/windows/`); the publisher rebuilds it from a checkout of the branch with `python3 scripts/build_windows.py --data-dir <checkout>` (same bytes as the capture's). There is no daily copy: a past day's page is that day's snapshot plus the history shards. |
 | `diagnostics/YYYY/YYYY-MM-DD.json` | daily | the run's diagnostic: snapshot read/missing/points, discovery status and slices, entrants, coverage, `counts` (known/new repos read, carried from an earlier run that day, unread after a retry, inaccessible), `history` (queue, read, failed, deferred, pending after), `completeness` (below), the per-window sources, exit code. |
 
@@ -50,6 +52,30 @@ before its anchor is read, never between the anchor and the reads, and a read th
 anchor is anchored and read again (`MAX_ANCHOR_AGE`): a star given in between would be counted twice. `pages` is how many
 pages were read and `has_more` whether older weeks exist beyond `start` (they were not read). Sum of `days` = `anchor_stars` when `has_more` is
 false (measured exact on 44 of 50 real repos, within 1 star on the other 6).
+
+## Metadata (descriptions and topics)
+
+`capture/metadata.py` runs last in the daily capture, after the counts, history, windows and diagnostic are written, and
+rewrites the diagnostic with a `metadata` block (same `captured_at`): `status` (`ok`, `disabled`, `failed` + `error`),
+`asked`, `checked`, `changed`, `failed`, `gone`, `queries`, `points`, `seconds`, `deferred`, `stopped` (why the reading
+stopped: `query budget`, the points plan, the deadline, three failed queries in a row), `queue` (`never_fetched`, `due`),
+`cohort`, `fetched`, `coverage` (fetched / cohort), `oldest_checked`, `shards_written` and `budget` (`queries_used`,
+`queries_limit`, the points-per-hour plan, the limit GitHub reported, the effective one, `remaining_at_end`, `reserve`). Its
+errors, waits and deadline never change the count files, `completeness`, the exit code or the publication.
+
+- **Queue**: cohort repos (today's count above the threshold) never fetched first, newest `first_seen` first, then repos
+  whose check is at least 30 days old (`--metadata-recheck-days`), oldest first. Repos outside the cohort are not read.
+- **Bounds**: at most 300 queries of 100 repos a day (`--metadata-queries`, the workflow's `metadata_queries` input; 0
+  disables the step); no request or rate wait past 125 min from the run's start (`--metadata-deadline-minutes`); and a
+  points plan of 1,000 an hour (`--metadata-points-per-hour`): a query starts only when it fits in GitHub's `remaining`
+  less whatever the reported limit holds above the plan and a 50-point reserve, else the step waits for the reset if
+  that comes before the deadline, or stops. A stop defers the rest of the queue untouched; nothing is counted failed.
+- **Measured 2026-10-31** (20 queries on a copy of the branch, the 2,000 newest entrants): 1 point per query of 100 repos
+  (`repositoryTopics(first: 20)` included) and 1 for the `rateLimit` preflight, median 4.6 s (3.9–5.9 s) and 56 KB per
+  answer, 0 errors; 46% of those repos had no topic, none had more than 20. At the full cohort (66,912 repos, the sample's
+  230 bytes a record) the shards hold ~15 MB (~58 KB each) and `checked.json` ~2.8 MB: ~4.3 MB of pack once, then
+  ~25–35 KiB a day (simulated: 2,300 re-checks and 60 content changes a day, ~55 shards rewritten). Coverage fills at
+  ~30,000 repos a night (~23 min, ~300 points), so in three nights; then ~24 queries (~2 min) a day.
 
 ## `windows/latest.json`: the interface
 
