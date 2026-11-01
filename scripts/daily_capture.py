@@ -2,7 +2,8 @@
 
 Order matters: the snapshot of the known set is written first, discovery (search, best effort, deadline) comes second and never
 blocks it, repos without history (oldest turn first, at most MAX_HISTORY_PER_DAY) get their two history pages, then
-repos.json, the history queue, the windows file and the diagnostic. The threshold is exclusive: --threshold 999 captures every
+repos.json, the history queue, the windows file and the diagnostic; last, the metadata step (capture.metadata: descriptions and
+topics, a bounded slice a day) adds its block to the diagnostic and never changes the exit code. The threshold is exclusive: --threshold 999 captures every
 repo with at least 1,000 stars. A same-day rerun keeps the earlier run's counts for the repos it could not read.
 The day's counts live in the snapshot only: repos.json carries no per-day field, so it only changes when a repo enters, is renamed or changes language (measured 2026-10-29: a daily `stars` + `last_seen` cost
 4.6 MiB of pack in 14 days, ~120 MiB a year, for data the snapshot already holds). Exit codes:
@@ -16,6 +17,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from capture.discovery import WORKERS as DISCOVERY_WORKERS, discover, total_count
 from capture.github import GitHub, GitHubError, token_from_environment
 from capture.history import anchored_reads, fold, pacific_date, read_pages, record_complete
+from capture import metadata
 from capture.snapshot import read_counts
 from capture.store import DataDir
 from capture.windows import build_page
@@ -26,6 +28,7 @@ COVERAGE_FLOOR = 0.99
 MAX_HISTORY_PER_DAY = 400
 CORE_PER_HOUR = 900  # the client's sliding-hour core budget: under GITHUB_TOKEN's 1,000, retries included
 HISTORY_DEADLINE_MINUTES = 110  # no history request starts after this (from the run's start): 40 of the job's 150 min stay for writing and committing
+METADATA_DEADLINE_MINUTES = 125  # no metadata request (or rate wait) runs past this: 25 min stay for rewriting the diagnostic and committing
 
 
 def utcnow():
@@ -76,7 +79,8 @@ def completeness(threshold, counts, discovery, total, total_source, known_unread
 
 
 def run(gh, data, threshold, now=None, workers=4, deadline_minutes=60, skip_discovery=False, sample=None, max_slices=None, max_history=MAX_HISTORY_PER_DAY,
-        discovery_workers=DISCOVERY_WORKERS, wall=utcnow, log=print, history_deadline_minutes=HISTORY_DEADLINE_MINUTES):
+        discovery_workers=DISCOVERY_WORKERS, wall=utcnow, log=print, history_deadline_minutes=HISTORY_DEADLINE_MINUTES, metadata_queries=metadata.MAX_QUERIES,
+        metadata_points_per_hour=metadata.POINTS_PER_HOUR, metadata_deadline_minutes=METADATA_DEADLINE_MINUTES, metadata_recheck_days=metadata.RECHECK_DAYS):
     now = now or wall()
     date = pacific_date(now)
     started = time.monotonic()
@@ -244,6 +248,17 @@ def run(gh, data, threshold, now=None, workers=4, deadline_minutes=60, skip_disc
     diagnostic['exit_code'] = 2 if not counts else (0 if status['status'] == 'complete' else 3)
     diagnostic['seconds'] = round(time.monotonic() - started, 1)
     data.write_diagnostic(date, diagnostic)
+    # 6. metadata, after every count file and the diagnostic are written: its errors, waits and deadline leave them and the exit code as they are
+    if counts:
+        try:
+            block = metadata.capture(gh, data.root, [i for i, stars in counts.items() if stars > threshold], known, date, max_queries=metadata_queries,
+                                     points_per_hour=metadata_points_per_hour, deadline_seconds=metadata_deadline_minutes * 60 - (time.monotonic() - started),
+                                     recheck_days=metadata_recheck_days, log=log)
+            diagnostic['metadata'] = {'status': 'disabled' if metadata_queries <= 0 else 'ok', **block}
+        except Exception as error:  # noqa: BLE001 - metadata must never take the capture down with it
+            diagnostic['metadata'] = {'status': 'failed', 'error': repr(error)[:300]}
+        data.write_diagnostic(date, diagnostic)  # same captured_at: the publish gate's generation check is unchanged
+        log(f'metadata: {diagnostic["metadata"].get("status")}, checked {diagnostic["metadata"].get("checked")}, coverage {diagnostic["metadata"].get("coverage")}')
     log(f'coverage: {above} rows above {threshold} vs total_count {total} ({total_source}) -> {diagnostic["coverage"]["ok"]}; exit {diagnostic["exit_code"]}')
     return diagnostic['exit_code'], diagnostic
 
@@ -261,6 +276,10 @@ def main(argv=None):
     parser.add_argument('--max-history', type=int, default=MAX_HISTORY_PER_DAY, help=f'read history for at most this many repos that lack it (default {MAX_HISTORY_PER_DAY})')
     parser.add_argument('--core-per-hour', type=int, default=CORE_PER_HOUR, help=f'sliding-hour core request budget (default {CORE_PER_HOUR})')
     parser.add_argument('--history-deadline-minutes', type=float, default=HISTORY_DEADLINE_MINUTES, help=f'no history request starts this long after the run started (default {HISTORY_DEADLINE_MINUTES})')
+    parser.add_argument('--metadata-queries', type=int, default=metadata.MAX_QUERIES, help=f'metadata queries (100 repos each) per day; 0 disables the step (default {metadata.MAX_QUERIES})')
+    parser.add_argument('--metadata-points-per-hour', type=int, default=metadata.POINTS_PER_HOUR, help=f'GraphQL points an hour the metadata step plans for; the lower of this and GitHub\'s reported limit applies (default {metadata.POINTS_PER_HOUR})')
+    parser.add_argument('--metadata-deadline-minutes', type=float, default=METADATA_DEADLINE_MINUTES, help=f'no metadata request starts this long after the run started (default {METADATA_DEADLINE_MINUTES})')
+    parser.add_argument('--metadata-recheck-days', type=int, default=metadata.RECHECK_DAYS, help=f'a fetched repo is read again after this many days (default {metadata.RECHECK_DAYS})')
     parser.add_argument('--diagnostic', help='also write the diagnostic JSON here')
     parser.add_argument('--request-log', help='append one JSON line per HTTP request here (timestamp, URL, status, rate-limit remaining)')
     parser.add_argument('--dry-run', action='store_true', help='write into a fresh temporary directory, printed at the end, instead of --data-dir')
@@ -279,6 +298,8 @@ def main(argv=None):
             for name in ('repos.json', 'slices.json', 'meta.json', 'history-pending.json'):
                 if (root / name).exists():
                     shutil.copy(root / name, tmp / name)
+            if (root / 'metadata').is_dir():
+                shutil.copytree(root / 'metadata', tmp / 'metadata')
         root = tmp
     now = dt.datetime.fromisoformat(args.now.replace('Z', '+00:00')) if args.now else None
     def log_request(entry):
@@ -288,7 +309,9 @@ def main(argv=None):
     gh = GitHub(token_from_environment(), request_log=log_request if args.request_log else None, core_per_hour=args.core_per_hour)
     code, diagnostic = run(gh, DataDir(root), args.threshold, now=now, workers=args.workers, deadline_minutes=args.deadline_minutes,
                            skip_discovery=args.skip_discovery, sample=args.sample, max_slices=args.max_slices, max_history=args.max_history,
-                           discovery_workers=args.discovery_workers, history_deadline_minutes=args.history_deadline_minutes)
+                           discovery_workers=args.discovery_workers, history_deadline_minutes=args.history_deadline_minutes, metadata_queries=args.metadata_queries,
+                           metadata_points_per_hour=args.metadata_points_per_hour, metadata_deadline_minutes=args.metadata_deadline_minutes,
+                           metadata_recheck_days=args.metadata_recheck_days)
     diagnostic['data_dir'] = str(root)
     diagnostic['dry_run'] = args.dry_run
     diagnostic['requests'] = dict(gh.counts)
