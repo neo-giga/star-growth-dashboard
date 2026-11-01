@@ -180,6 +180,11 @@ function invalidNote(invalid) {
   if (!invalid.length) return null;
   return `Ignored from this link: ${invalid.map(([key, value, help]) => `${key}=${value} (expected ${help})`).join('; ')}. The other filters still apply.`;
 }
+/* The first render's state when the visitor edited the form while the data loaded: the link's state (its language included: none can be
+   chosen before the options exist) with the visitor's search, created, stars, sort and order, from page 1. */
+function keepEarlyEdits(fromURL, edits) {
+  return {...fromURL, search: edits.search, created: edits.created, stars: edits.stars, sort: edits.sort, direction: edits.direction, page: 1};
+}
 /* Active filters as [key, qualifier text] pairs, in the URL's order; the chips render these. */
 function activeFilters(state) {
   return [['q', (state.search || '').trim()], ['language', state.language || ''], ['created', formatRange(state.created.after, state.created.before)],
@@ -287,7 +292,7 @@ function createCountLoader(fetcher, storage, now = () => Date.now()) {
     return result;
   };
 }
-if (typeof module !== 'undefined') module.exports = {captureNote, PENDING, numeric, utcDay, parseRange, parseCreated, parseStars, formatRange, createdDay, filterRows, pageOf, parseQuery, serializeQuery, invalidNote, activeFilters, UNKNOWN_LANGUAGE, NO_FILTERS, PAGE_SIZE, creationTime, creationLabel, repoURL, displayNumber, timeLabel, clockLabel, parseData, windowTooltip, windowNote, sortValue, selectRows, nextSort, metadataFields, linkCount, countOutcome, repoOutcome, countLabel, apiRepoPath, createCountLoader, COLUMNS, GAIN_COLUMNS, GITHUB_COUNTS, DATA_FILE, DATA_SCHEMA, DEFAULT_SORT};
+if (typeof module !== 'undefined') module.exports = {captureNote, PENDING, numeric, utcDay, parseRange, parseCreated, parseStars, formatRange, createdDay, filterRows, pageOf, parseQuery, serializeQuery, invalidNote, keepEarlyEdits, activeFilters, UNKNOWN_LANGUAGE, NO_FILTERS, PAGE_SIZE, creationTime, creationLabel, repoURL, displayNumber, timeLabel, clockLabel, parseData, windowTooltip, windowNote, sortValue, selectRows, nextSort, metadataFields, linkCount, countOutcome, repoOutcome, countLabel, apiRepoPath, createCountLoader, COLUMNS, GAIN_COLUMNS, GITHUB_COUNTS, DATA_FILE, DATA_SCHEMA, DEFAULT_SORT};
 if (typeof document !== 'undefined') {
   const el = id => document.getElementById(id);
   let data = null, page = 1, state = {sort: DEFAULT_SORT, direction: 'desc', ...NO_FILTERS}, linkNote = null, selection = {key: null, rows: []};
@@ -355,7 +360,7 @@ if (typeof document !== 'undefined') {
       if (bad) { invalid = true; el(id).setAttribute('aria-invalid', 'true'); } else el(id).removeAttribute('aria-invalid');
       return bad ? null : n;
     };
-    const next = {search: el('search').value, language: el('language').value, created: {after: utcDay(el('created-after').value), before: utcDay(el('created-before').value)},
+    const next = {search: el('search').value, language: data ? el('language').value : state.language, created: {after: utcDay(el('created-after').value), before: utcDay(el('created-before').value)},
       stars: {min: star('stars-min'), max: star('stars-max')}};
     return {next, note: invalid ? 'Star bounds are whole numbers; the invalid bound is ignored.' : null};
   }
@@ -435,13 +440,19 @@ if (typeof document !== 'undefined') {
   function setSort(next) { commit(next); }
   function applyFilters(push) { const {next, note} = readControls(); linkNote = null; renderNotes(note); commit(next, {push}); }
   /* State from the URL: invalid values are dropped and named in a note; a language the dataset does not have is dropped the same way. */
-  function loadURL() {
-    const {state: parsed, invalid} = parseQuery(location.search);
+  function loadURL(keepEdits = false) {
+    const {state: fromURL, invalid} = parseQuery(location.search), edits = keepEdits ? readControls() : null;
+    const parsed = edits ? keepEarlyEdits(fromURL, {...state, ...edits.next}) : fromURL;
     if (parsed.language && ![...el('language').options].some(option => option.value === parsed.language)) { invalid.push(['language', parsed.language, QUERY_HELP.language]); parsed.language = ''; }
     page = parsed.page; delete parsed.page; state = parsed; linkNote = invalidNote(invalid);
-    writeControls(); renderNotes(null); render();
+    writeControls(); renderNotes(edits && edits.note); render();
+    if (edits) writeURL(false);
   }
   const debounce = (fn, ms) => { let timer = null; return () => { clearTimeout(timer); timer = setTimeout(fn, ms); }; };
+  /* Until the data arrives the form shows the link's state; an edit made meanwhile is kept and applied on load, not replaced by the URL. */
+  let editedEarly = false;
+  { const {state: fromURL} = parseQuery(location.search); page = fromURL.page; delete fromURL.page; state = fromURL; writeControls(); renderHeaders(); }
+  for (const type of ['input', 'change', 'click']) document.addEventListener(type, event => { if (!data && event.target instanceof Element && event.target.closest('.filters, .sort-controls, thead')) editedEarly = true; }, true);
   fetch(DATA_FILE, {cache: 'no-store'}).then(response => {
     if (!response.ok) throw new Error(`Data request failed (${response.status}).`);
     return response.json();
@@ -453,7 +464,7 @@ if (typeof document !== 'undefined') {
     for (const [language, count] of [...[...counts].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)), ...(unknown ? [[UNKNOWN_LANGUAGE, unknown]] : [])]) {
       const option = node('option', `${language} (${count.toLocaleString('en-US')})`); option.value = language; el('language').append(option);
     }
-    loadURL();
+    loadURL(editedEarly);
   }).catch(error => {
     el('error').hidden = false; el('error').textContent = `${error.message} This page must be served over HTTP(S), not opened as a local file.`;
     el('result-count').textContent = 'No data loaded.'; el('page-label').textContent = '';
