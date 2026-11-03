@@ -1,11 +1,11 @@
 """Exercise the app JS helpers under node: the page file parser, sorting (nulls last both ways), the sort-state machine, the filters and their URL state, Link-count parsing, GitHub outcome mapping, the repository record, labels."""
-import json,pathlib,re,shutil,subprocess,unittest
+import json,os,pathlib,re,shutil,subprocess,unittest
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 APP=ROOT/re.search(r'<script[^>]+src="([^"]+)"',(ROOT/'index.html').read_text())[1]
 def app_gains():
  return ['gain_1d','gain_7d','gain_15d','gain_30d','gain_90d','gain_180d','gain_365d']
-def run(script):
- proc=subprocess.run(['node','-e',f"const app=require({json.dumps(str(APP))});{script}"],capture_output=True,text=True,check=True)
+def run(script,env=None):
+ proc=subprocess.run(['node','-e',f"const app=require({json.dumps(str(APP))});{script}"],capture_output=True,text=True,check=True,env=None if env is None else {**os.environ,**env})
  return json.loads(proc.stdout)
 @unittest.skipUnless(shutil.which('node'),'node not installed')
 class AppJsTests(unittest.TestCase):
@@ -27,6 +27,11 @@ class AppJsTests(unittest.TestCase):
  def test_labels(self):
   self.assertEqual(run('console.log(JSON.stringify([app.countLabel(18210),app.countLabel("too_many"),app.countLabel("unavailable"),app.countLabel(null),app.creationLabel("2026-04-14T00:51:32+00:00"),app.creationLabel(null),app.clockLabel(1793171427000),app.displayNumber(null),app.displayNumber(5,true)]))'),
    ['18,210','too many to count','unavailable','—','Apr 14, 2026','—','07:10 UTC','—','+5'])
+ def test_the_updated_line_is_in_the_viewers_time_zone_and_its_title_is_the_exact_utc_time(self):
+  script='console.log(JSON.stringify(["2026-11-02T13:45:59Z","2026-07-01T00:05:00+00:00","bad","",null].map(app.updatedLabel)))'
+  self.assertEqual(run(script,{'TZ':'UTC'}),[{'text':'Updated 2026-11-02 13:45 UTC','title':'2026-11-02 13:45 UTC'},{'text':'Updated 2026-07-01 00:05 UTC','title':'2026-07-01 00:05 UTC'},None,None,None])
+  self.assertEqual(run(script,{'TZ':'America/Los_Angeles'}),[{'text':'Updated 2026-11-02 05:45 PST','title':'2026-11-02 13:45 UTC'},{'text':'Updated 2026-06-30 17:05 PDT','title':'2026-07-01 00:05 UTC'},None,None,None])
+  self.assertEqual(run(script,{'TZ':'Asia/Kolkata'})[0],{'text':'Updated 2026-11-02 19:15 GMT+5:30','title':'2026-11-02 13:45 UTC'})
  def test_count_loader_caches_definite_results_in_storage(self):
   script='''(async()=>{const store=new Map(),storage={getItem:k=>store.get(k)??null,setItem:(k,v)=>store.set(k,v)};let calls=[];
    const headers=o=>({get:k=>o[k.toLowerCase()]??null});

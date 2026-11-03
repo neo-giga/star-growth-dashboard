@@ -50,6 +50,13 @@ function timeLabel(value) {
   if (!value || Number.isNaN(Date.parse(value))) return UNKNOWN;
   return new Date(value).toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, ' UTC');
 }
+/* The header's "Updated" line in the viewer's own time zone, named (2026-11-02 05:45 PST), with the exact UTC time for its hover title; null when the value is not a time. */
+function updatedLabel(value) {
+  if (!value || Number.isNaN(Date.parse(value))) return null;
+  const format = new Intl.DateTimeFormat('en-US', {year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZoneName: 'short'});
+  const part = Object.fromEntries(format.formatToParts(new Date(value)).map(p => [p.type, p.value]));
+  return {text: `Updated ${part.year}-${part.month}-${part.day} ${part.hour}:${part.minute} ${part.timeZoneName}`, title: `${timeLabel(value).slice(0, 16)} UTC`};
+}
 function clockLabel(value) {
   const instant = typeof value === 'number' ? value : Date.parse(value);
   return Number.isFinite(instant) ? new Date(instant).toISOString().slice(11, 16) + ' UTC' : UNKNOWN;
@@ -317,7 +324,7 @@ function createCountLoader(fetcher, storage, now = () => Date.now()) {
     return result;
   };
 }
-if (typeof module !== 'undefined') module.exports = {captureNote, pendingTitle, pendingNote, RETIRED_SORTS, numeric, parseDescriptions, descriptionOf, DESCRIPTIONS_FILE, utcDay, parseRange, parseCreated, parseStars, formatRange, createdDay, filterRows, pageOf, parseQuery, serializeQuery, invalidNote, keepEarlyEdits, activeFilters, UNKNOWN_LANGUAGE, NO_FILTERS, PAGE_SIZE, creationTime, creationLabel, repoURL, displayNumber, timeLabel, clockLabel, parseData, windowTooltip, windowNote, sortValue, selectRows, nextSort, metadataFields, linkCount, countOutcome, repoOutcome, countLabel, apiRepoPath, createCountLoader, COLUMNS, GAIN_COLUMNS, GITHUB_COUNTS, DATA_FILE, DATA_SCHEMA, DEFAULT_SORT};
+if (typeof module !== 'undefined') module.exports = {captureNote, pendingTitle, pendingNote, RETIRED_SORTS, numeric, parseDescriptions, descriptionOf, DESCRIPTIONS_FILE, utcDay, parseRange, parseCreated, parseStars, formatRange, createdDay, filterRows, pageOf, parseQuery, serializeQuery, invalidNote, keepEarlyEdits, activeFilters, UNKNOWN_LANGUAGE, NO_FILTERS, PAGE_SIZE, creationTime, creationLabel, repoURL, displayNumber, timeLabel, updatedLabel, clockLabel, parseData, windowTooltip, windowNote, sortValue, selectRows, nextSort, metadataFields, linkCount, countOutcome, repoOutcome, countLabel, apiRepoPath, createCountLoader, COLUMNS, GAIN_COLUMNS, GITHUB_COUNTS, DATA_FILE, DATA_SCHEMA, DEFAULT_SORT};
 if (typeof document !== 'undefined') {
   const el = id => document.getElementById(id);
   let data = null, page = 1, state = {sort: DEFAULT_SORT, direction: 'desc', ...NO_FILTERS}, linkNote = null, selection = {key: null, rows: []};
@@ -416,7 +423,7 @@ if (typeof document !== 'undefined') {
     const total = rows.length.toLocaleString('en-US'), threshold = data.min_stars === null ? '' : ` with at least ${data.min_stars.toLocaleString('en-US')} stars`;
     el('result-count').textContent = sorted.length === rows.length ? `${total} repositories${threshold}` : `${sorted.length.toLocaleString('en-US')} of ${total} repositories${threshold}`;
     if (data.min_stars !== null) { el('min-stars').textContent = data.min_stars.toLocaleString('en-US'); document.title = `Momentum · Repositories with at least ${data.min_stars.toLocaleString('en-US')} stars`; }
-    el('updated').textContent = timeLabel(data.generated_at) !== UNKNOWN ? `Updated ${timeLabel(data.generated_at).slice(0, 16)} UTC` : '';
+    const updated = updatedLabel(data.generated_at); el('updated').textContent = updated ? updated.text : ''; el('updated').title = updated ? updated.title : '';
     renderHeaders(); renderChips();
     const note = windowNote(windows.find(w => w.column === chosen), data.date);  /* cards have no header row to carry it */
     el('sort-note').textContent = note || ''; el('sort-note').hidden = !note;
